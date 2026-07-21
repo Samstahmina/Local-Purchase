@@ -59,6 +59,19 @@ def odoo_search_count(cookies, model, domain):
     raise Exception(f"Odoo search_count failed: {result}")
 
 
+def get_worksheet(sh, name):
+    try:
+        return sh.worksheet(name)
+    except gspread.exceptions.WorksheetNotFound:
+        titles = [ws.title for ws in sh.worksheets()]
+        for title in titles:
+            if title.strip().lower() == name.strip().lower():
+                return sh.worksheet(title)
+        raise Exception(
+            f"Worksheet '{name}' not found. Available worksheets: {titles}"
+        )
+
+
 def get_start_date():
     if START_DATE_ENV:
         return datetime.strptime(START_DATE_ENV, "%Y-%m-%d").date()
@@ -71,11 +84,11 @@ def get_start_date():
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(SPREADSHEET_ID)
-    ws = sh.worksheet(SHEET_NAME)
+    ws = get_worksheet(sh, SHEET_NAME)
 
     start_date_str = ws.acell("A1").value
     if not start_date_str:
-        raise ValueError("Cell A1 in sheet 'testing' is empty. Please set the start date (YYYY-MM-DD).")
+        raise ValueError(f"Cell A1 in sheet '{SHEET_NAME}' is empty. Please set the start date (YYYY-MM-DD).")
     return datetime.strptime(start_date_str.strip(), "%Y-%m-%d").date()
 
 
@@ -88,7 +101,7 @@ def update_sheet(count, start_date, today):
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(SPREADSHEET_ID)
-    ws = sh.worksheet(SHEET_NAME)
+    ws = get_worksheet(sh, SHEET_NAME)
 
     ws.update(
         [[start_date.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"), count, datetime.now().strftime("%Y-%m-%d %H:%M:%S")]],
