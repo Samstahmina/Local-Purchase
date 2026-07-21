@@ -56,6 +56,7 @@ FLAT_HEADERS = [
     "Priority",
     "Name",
     "Partner",
+    "Products",
     "PI No",
     "Create Date",
     "Order Status",
@@ -186,13 +187,73 @@ def odoo_web_search_read(cookies, model, domain, offset=0, limit=80):
     raise Exception(f"Odoo web_search_read failed: {result}")
 
 
-def flatten_record(record):
+def odoo_search_read(cookies, model, domain, fields, offset=0, limit=80):
+    url = f"{ODOO_URL}/web/dataset/call_kw"
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "call",
+        "params": {
+            "model": model,
+            "method": "search_read",
+            "args": [domain],
+            "kwargs": {
+                "fields": fields,
+                "offset": offset,
+                "limit": limit,
+            },
+        },
+    }
+    resp = requests.post(url, data=json.dumps(payload), headers=HEADERS, cookies=cookies, timeout=60)
+    resp.raise_for_status()
+    result = resp.json()
+    if "result" in result:
+        return result["result"]
+    raise Exception(f"Odoo search_read failed: {result}")
+
+
+def fetch_order_products(cookies, order_ids):
+    if not order_ids:
+        return {}
+    domain = [["order_id", "in", list(order_ids)]]
+    all_lines = []
+    offset = 0
+    limit = 200
+    while True:
+        result = odoo_search_read(
+            cookies,
+            "purchase.order.line",
+            domain,
+            ["order_id", "product_id"],
+            offset=offset,
+            limit=limit,
+        )
+        records = result.get("records", [])
+        all_lines.extend(records)
+        if len(records) < limit:
+            break
+        offset += limit
+
+    products_by_order = {}
+    for line in all_lines:
+        order_id = line.get("order_id") or {}
+        oid = order_id.get("id") if isinstance(order_id, dict) else line.get("order_id")
+        product = line.get("product_id") or {}
+        pname = product.get("display_name") if isinstance(product, dict) else None
+        if pname:
+            products_by_order.setdefault(oid, []).append(pname)
+
+    return {oid: ", ".join(names) for oid, names in products_by_order.items()}
+
+
+def flatten_record(record, product_names_by_order=None):
     row = []
     row.append(record.get("id", ""))
     row.append(record.get("priority", ""))
     row.append(record.get("name", ""))
     partner = record.get("partner_id") or {}
     row.append(partner.get("display_name", "") if partner else "")
+    oid = record.get("id", "")
+    row.append((product_names_by_order or {}).get(oid, ""))
     row.append(record.get("x_studio_pi_no", ""))
     row.append(record.get("create_date", ""))
     row.append(record.get("x_studio_order_status", ""))
@@ -283,7 +344,11 @@ def main():
 
     print(f"Total records fetched: {len(all_records)}")
 
-    rows = [flatten_record(r) for r in all_records]
+    order_ids = [r.get("id") for r in all_records if r.get("id")]
+    print(f"Fetching product names for {len(order_ids)} orders...")
+    product_names_by_order = fetch_order_products(cookies, order_ids)
+
+    rows = [flatten_record(r, product_names_by_order) for r in all_records]
 
     print("Connecting to Google Sheets...")
     gc = get_gspread_client()
