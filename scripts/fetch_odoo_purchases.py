@@ -56,7 +56,8 @@ FLAT_HEADERS = [
     "Priority",
     "Name",
     "Partner",
-    "Products",
+    "Product",
+    "Product Code",
     "PI No",
     "Create Date",
     "Order Status",
@@ -213,7 +214,7 @@ def odoo_search_read(cookies, model, domain, fields, offset=0, limit=80):
 
 def fetch_order_products(cookies, order_ids):
     if not order_ids:
-        return {}
+        return []
     domain = [["order_id", "in", list(order_ids)]]
     all_lines = []
     offset = 0
@@ -238,7 +239,7 @@ def fetch_order_products(cookies, order_ids):
             break
         offset += limit
 
-    products_by_order = {}
+    products = []
     for line in all_lines:
         order_id = line.get("order_id")
         if isinstance(order_id, list):
@@ -247,28 +248,36 @@ def fetch_order_products(cookies, order_ids):
             oid = order_id.get("id")
         else:
             oid = order_id
+
         product = line.get("product_id")
         if isinstance(product, list):
-            pname = product[1] if len(product) > 1 else (product[0] if product else None)
+            if len(product) >= 2:
+                pcode = product[1] if len(product) >= 3 else ""
+                pname = product[-1]
+            else:
+                pcode = ""
+                pname = product[0] if product else ""
         elif isinstance(product, dict):
-            pname = product.get("display_name")
+            pname = product.get("display_name", "")
+            pcode = product.get("default_code", "") or product.get("x_studio_pi_no", "") or ""
         else:
-            pname = None
-        if pname and oid:
-            products_by_order.setdefault(oid, []).append(pname)
+            pcode = ""
+            pname = ""
 
-    return {oid: ", ".join(names) for oid, names in products_by_order.items()}
+        products.append((oid, pname, pcode))
+
+    return products
 
 
-def flatten_record(record, product_names_by_order=None):
+def flatten_record(record, product_name="", product_code=""):
     row = []
     row.append(record.get("id", ""))
     row.append(record.get("priority", ""))
     row.append(record.get("name", ""))
     partner = record.get("partner_id") or {}
     row.append(partner.get("display_name", "") if partner else "")
-    oid = record.get("id", "")
-    row.append((product_names_by_order or {}).get(oid, ""))
+    row.append(product_name)
+    row.append(product_code)
     row.append(record.get("x_studio_pi_no", ""))
     row.append(record.get("create_date", ""))
     row.append(record.get("x_studio_order_status", ""))
@@ -360,10 +369,22 @@ def main():
     print(f"Total records fetched: {len(all_records)}")
 
     order_ids = [r.get("id") for r in all_records if r.get("id")]
-    print(f"Fetching product names for {len(order_ids)} orders...")
-    product_names_by_order = fetch_order_products(cookies, order_ids)
+    print(f"Fetching product lines for {len(order_ids)} orders...")
+    product_lines = fetch_order_products(cookies, order_ids)
 
-    rows = [flatten_record(r, product_names_by_order) for r in all_records]
+    products_by_order = {}
+    for oid, pname, pcode in product_lines:
+        products_by_order.setdefault(oid, []).append((pname, pcode))
+
+    rows = []
+    for record in all_records:
+        oid = record.get("id")
+        products = products_by_order.get(oid, [])
+        if products:
+            for pname, pcode in products:
+                rows.append(flatten_record(record, pname, pcode))
+        else:
+            rows.append(flatten_record(record, "", ""))
 
     print("Connecting to Google Sheets...")
     gc = get_gspread_client()
