@@ -15,7 +15,7 @@ SPREADSHEET_ID = "1XDPawgWLd34FbRiSOEsoR8qgpWlUVIu5kM1YLVEXB2o"
 SHEET_NAME = "testing"
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
 
-START_DATE_ENV = os.environ.get("START_DATE", "").strip()
+START_DATE_ENV = os.environ.get("START_DATE", "").strip() or "2026-07-01"
 
 HEADERS = {"Content-Type": "application/json"}
 
