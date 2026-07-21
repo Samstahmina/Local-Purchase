@@ -212,6 +212,19 @@ def odoo_search_read(cookies, model, domain, fields, offset=0, limit=80):
     raise Exception(f"Odoo search_read failed: {result}")
 
 
+def parse_product_string(raw):
+    if not raw:
+        return "", ""
+    raw = str(raw).strip()
+    start = raw.find("[")
+    end = raw.find("]")
+    if start != -1 and end != -1 and end > start:
+        code = raw[start + 1:end]
+        name = raw[end + 1:].strip()
+        return name, code
+    return raw, ""
+
+
 def fetch_order_products(cookies, order_ids):
     if not order_ids:
         return []
@@ -251,15 +264,13 @@ def fetch_order_products(cookies, order_ids):
 
         product = line.get("product_id")
         if isinstance(product, list):
-            if len(product) >= 2:
-                pcode = product[1] if len(product) >= 3 else ""
-                pname = product[-1]
-            else:
-                pcode = ""
-                pname = product[0] if product else ""
+            raw = product[1] if len(product) > 1 else (product[0] if product else "")
+            pname, pcode = parse_product_string(raw)
         elif isinstance(product, dict):
             pname = product.get("display_name", "")
             pcode = product.get("default_code", "") or product.get("x_studio_pi_no", "") or ""
+            if pcode and not pname.startswith("["):
+                pname = f"[{pcode}] {pname}"
         else:
             pcode = ""
             pname = ""
