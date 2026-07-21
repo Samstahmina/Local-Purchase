@@ -219,6 +219,14 @@ def get_start_date():
     return datetime.strptime(start_date_str.strip(), "%Y-%m-%d").date()
 
 
+def col_to_letter(col):
+    result = ""
+    while col > 0:
+        col, remainder = divmod(col - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
+
+
 def update_sheet(rows, start_date, today):
     creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
     scopes = [
@@ -233,7 +241,13 @@ def update_sheet(rows, start_date, today):
     ws.clear()
     ws.update([FLAT_HEADERS], "A1")
     if rows:
-        ws.update(rows, f"A2:{chr(64 + len(FLAT_HEADERS))}{len(rows) + 1}")
+        end_col = col_to_letter(len(FLAT_HEADERS))
+        chunk_size = 50
+        for i in range(0, len(rows), chunk_size):
+            chunk = rows[i:i + chunk_size]
+            start_row = i + 2
+            end_row = i + len(chunk) + 1
+            ws.update(chunk, f"A{start_row}:{end_col}{end_row}")
 
 
 def main():
