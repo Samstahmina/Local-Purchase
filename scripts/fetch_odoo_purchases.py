@@ -227,7 +227,12 @@ def fetch_order_products(cookies, order_ids):
             offset=offset,
             limit=limit,
         )
-        records = result.get("records", [])
+        if isinstance(result, list):
+            records = result
+        elif isinstance(result, dict):
+            records = result.get("records", [])
+        else:
+            records = []
         all_lines.extend(records)
         if len(records) < limit:
             break
@@ -235,11 +240,21 @@ def fetch_order_products(cookies, order_ids):
 
     products_by_order = {}
     for line in all_lines:
-        order_id = line.get("order_id") or {}
-        oid = order_id.get("id") if isinstance(order_id, dict) else line.get("order_id")
-        product = line.get("product_id") or {}
-        pname = product.get("display_name") if isinstance(product, dict) else None
-        if pname:
+        order_id = line.get("order_id")
+        if isinstance(order_id, list):
+            oid = order_id[0] if order_id else None
+        elif isinstance(order_id, dict):
+            oid = order_id.get("id")
+        else:
+            oid = order_id
+        product = line.get("product_id")
+        if isinstance(product, list):
+            pname = product[1] if len(product) > 1 else (product[0] if product else None)
+        elif isinstance(product, dict):
+            pname = product.get("display_name")
+        else:
+            pname = None
+        if pname and oid:
             products_by_order.setdefault(oid, []).append(pname)
 
     return {oid: ", ".join(names) for oid, names in products_by_order.items()}
