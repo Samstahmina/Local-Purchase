@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import time
 import requests
 from datetime import datetime, date
 import gspread
@@ -97,6 +98,40 @@ def get_worksheet(sh, name):
         raise Exception(
             f"Worksheet '{name}' not found. Available worksheets: {titles}"
         )
+
+
+def retry_gspread(func, *args, max_retries=5, backoff_factor=2, **kwargs):
+    for attempt in range(1, max_retries + 1):
+        try:
+            return func(*args, **kwargs)
+        except gspread.exceptions.APIError as e:
+            status = e.response.status_code if hasattr(e, "response") and e.response else None
+            if status == 429 or (status and status >= 500):
+                wait = backoff_factor ** attempt
+                print(f"Retrying gspread call after {status} error (attempt {attempt}/{max_retries}, wait {wait}s)...")
+                time.sleep(wait)
+            else:
+                raise
+        except requests.exceptions.ConnectionError:
+            wait = backoff_factor ** attempt
+            print(f"Retrying gspread call after connection error (attempt {attempt}/{max_retries}, wait {wait}s)...")
+            time.sleep(wait)
+    return func(*args, **kwargs)
+
+
+def get_gspread_client():
+    creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    return gspread.authorize(creds)
+
+
+def get_worksheet_cached(gc):
+    sh = retry_gspread(gc.open_by_key, SPREADSHEET_ID)
+    return retry_gspread(get_worksheet, sh, SHEET_NAME)
 
 
 def odoo_authenticate():
@@ -199,26 +234,6 @@ def flatten_record(record):
     return row
 
 
-def get_start_date():
-    if START_DATE_ENV:
-        return datetime.strptime(START_DATE_ENV, "%Y-%m-%d").date()
-
-    creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_key(SPREADSHEET_ID)
-    ws = get_worksheet(sh, SHEET_NAME)
-
-    start_date_str = ws.acell("A1").value
-    if not start_date_str:
-        raise ValueError(f"Cell A1 in sheet '{SHEET_NAME}' is empty. Please set the start date (YYYY-MM-DD).")
-    return datetime.strptime(start_date_str.strip(), "%Y-%m-%d").date()
-
-
 def col_to_letter(col):
     result = ""
     while col > 0:
@@ -227,19 +242,9 @@ def col_to_letter(col):
     return result
 
 
-def update_sheet(rows, start_date, today):
-    creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_key(SPREADSHEET_ID)
-    ws = get_worksheet(sh, SHEET_NAME)
-
-    ws.clear()
-    ws.update([FLAT_HEADERS], "A1")
+def update_sheet(ws, rows):
+    retry_gspread(ws.clear)
+    retry_gspread(ws.update, [FLAT_HEADERS], "A1")
     if rows:
         end_col = col_to_letter(len(FLAT_HEADERS))
         chunk_size = 50
@@ -247,7 +252,7 @@ def update_sheet(rows, start_date, today):
             chunk = rows[i:i + chunk_size]
             start_row = i + 2
             end_row = i + len(chunk) + 1
-            ws.update(chunk, f"A{start_row}:{end_col}{end_row}")
+            retry_gspread(ws.update, chunk, f"A{start_row}:{end_col}{end_row}")
 
 
 def main():
@@ -255,7 +260,7 @@ def main():
         print("Error: GOOGLE_CREDENTIALS_JSON environment variable is not set.", file=sys.stderr)
         sys.exit(1)
 
-    start_date = get_start_date()
+    start_date = datetime.strptime(START_DATE_ENV, "%Y-%m-%d").date()
     today = date.today()
     if start_date > today:
         print(f"Start date {start_date} is in the future. Nothing to fetch.", file=sys.stderr)
@@ -283,7 +288,12 @@ def main():
     print(f"Total records fetched: {len(all_records)}")
 
     rows = [flatten_record(r) for r in all_records]
-    update_sheet(rows, start_date, today)
+
+    print("Connecting to Google Sheets...")
+    gc = get_gspread_client()
+    ws = get_worksheet_cached(gc)
+
+    update_sheet(ws, rows)
     print(f"Updated Google Sheet '{SHEET_NAME}' with {len(rows)} records successfully.")
 
 
