@@ -6,16 +6,16 @@ from datetime import datetime, date
 import gspread
 from google.oauth2.service_account import Credentials
 
-ODOO_URL = os.environ.get("ODOO_URL", "https://taps.odoo.com").rstrip("/")
-ODOO_DB = os.environ.get("ODOO_DB", "masbha-tex-taps-master-2093561")
-ODOO_USERNAME = os.environ.get("ODOO_USERNAME", "ranak@texzipperbd.com")
-ODOO_PASSWORD = os.environ.get("ODOO_PASSWORD", "2326")
+ODOO_URL = "https://taps.odoo.com".rstrip("/")
+ODOO_DB = os.environ.get("ODOO_DB", "")
+ODOO_USERNAME = os.environ.get("ODOO_USERNAME", "")
+ODOO_PASSWORD = os.environ.get("ODOO_PASSWORD", "")
 
-SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "1XDPawgWLd34FbRiSOEsoR8qgpWlUVIu5kM1YLVEXB2o")
-SHEET_NAME = os.environ.get("SHEET_NAME", "testing")
+SPREADSHEET_ID = "1XDPawgWLd34FbRiSOEsoR8qgpWlUVIu5kM1YLVEXB2o"
+SHEET_NAME = "testing"
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
 
-START_DATE_ENV = os.environ.get("START_DATE", "")
+START_DATE_ENV = os.environ.get("START_DATE", "").strip()
 
 HEADERS = {"Content-Type": "application/json"}
 
