@@ -22,8 +22,6 @@ HEADERS = {"Content-Type": "application/json"}
 
 FIELDS_SPEC = {
     "priority": {},
-    "partner_ref": {},
-    "has_alternatives": {},
     "name": {},
     "partner_id": {"fields": {"display_name": {}}},
     "x_studio_pi_no": {},
@@ -56,8 +54,6 @@ FIELDS_SPEC = {
 FLAT_HEADERS = [
     "ID",
     "Priority",
-    "Partner Ref",
-    "Has Alternatives",
     "Name",
     "Partner",
     "PI No",
@@ -194,8 +190,6 @@ def flatten_record(record):
     row = []
     row.append(record.get("id", ""))
     row.append(record.get("priority", ""))
-    row.append(record.get("partner_ref", ""))
-    row.append(record.get("has_alternatives", ""))
     row.append(record.get("name", ""))
     partner = record.get("partner_id") or {}
     row.append(partner.get("display_name", "") if partner else "")
