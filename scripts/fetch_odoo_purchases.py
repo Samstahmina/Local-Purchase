@@ -81,6 +81,7 @@ FLAT_HEADERS = [
     "Amount Untaxed",
     "Amount Total",
     "Currency",
+    "Currency ID",
     "Gate Entry",
     "State",
     "Invoice Status",
@@ -246,7 +247,8 @@ def update_sheet(ws, rows):
     retry_gspread(ws.clear)
     retry_gspread(ws.update, [FLAT_HEADERS], "A1")
     if rows:
-        end_col = col_to_letter(len(FLAT_HEADERS))
+        max_cols = max(len(FLAT_HEADERS), max((len(r) for r in rows), default=0))
+        end_col = col_to_letter(max_cols)
         chunk_size = 50
         for i in range(0, len(rows), chunk_size):
             chunk = rows[i:i + chunk_size]
