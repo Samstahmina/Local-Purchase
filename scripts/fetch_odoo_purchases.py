@@ -237,7 +237,7 @@ def fetch_order_products(cookies, order_ids):
             cookies,
             "purchase.order.line",
             domain,
-            ["order_id", "product_id"],
+            ["order_id", "product_id", "price_subtotal", "price_total"],
             offset=offset,
             limit=limit,
         )
@@ -275,12 +275,16 @@ def fetch_order_products(cookies, order_ids):
             pcode = ""
             pname = ""
 
-        products.append((oid, pname, pcode))
+        amount_untaxed = line.get("price_subtotal", 0) or 0
+        amount_total = line.get("price_total", 0) or 0
+        products.append((oid, pname, pcode, amount_untaxed, amount_total))
 
     return products
 
 
-def flatten_record(record, product_name="", product_code=""):
+def flatten_record(record, product_name="", product_code="", amount_untaxed=0, amount_total=0):
+    if not product_name:
+        return None
     row = []
     row.append(record.get("id", ""))
     row.append(record.get("priority", ""))
@@ -313,8 +317,8 @@ def flatten_record(record, product_name="", product_code=""):
     activity_type = record.get("activity_type_id") or {}
     row.append(activity_type.get("display_name", "") if activity_type else "")
     row.append(record.get("origin", ""))
-    row.append(record.get("amount_untaxed", ""))
-    row.append(record.get("amount_total", ""))
+    row.append(amount_untaxed)
+    row.append(amount_total)
     currency = record.get("x_studio_currency") or {}
     row.append(currency.get("display_name", "") if currency else "")
     row.append(record.get("x_studio_gate_entry", ""))
@@ -384,18 +388,17 @@ def main():
     product_lines = fetch_order_products(cookies, order_ids)
 
     products_by_order = {}
-    for oid, pname, pcode in product_lines:
-        products_by_order.setdefault(oid, []).append((pname, pcode))
+    for oid, pname, pcode, amt_untaxed, amt_total in product_lines:
+        if pname:
+            products_by_order.setdefault(oid, []).append((pname, pcode, amt_untaxed, amt_total))
 
     rows = []
     for record in all_records:
         oid = record.get("id")
         products = products_by_order.get(oid, [])
         if products:
-            for pname, pcode in products:
-                rows.append(flatten_record(record, pname, pcode))
-        else:
-            rows.append(flatten_record(record, "", ""))
+            for pname, pcode, amt_untaxed, amt_total in products:
+                rows.append(flatten_record(record, pname, pcode, amt_untaxed, amt_total))
 
     print("Connecting to Google Sheets...")
     gc = get_gspread_client()
