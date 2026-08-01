@@ -1,0 +1,7 @@
+*.har
+*response_sample.json
+*request_sample.json
+*record_sample.json
+*entry*.json
+__pycache__/
+*.pyc
