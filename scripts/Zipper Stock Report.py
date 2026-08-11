@@ -306,10 +306,10 @@ def main():
 
     filtered_records = []
     for r in all_records:
-        rd = r.get("receive_date", "") or ""
-        if rd:
+        cd = r.get("create_date", "") or ""
+        if cd:
             try:
-                dt = datetime.strptime(rd[:10], "%Y-%m-%d").date()
+                dt = datetime.strptime(cd[:10], "%Y-%m-%d").date()
                 if month_start <= dt <= month_end:
                     filtered_records.append(r)
             except Exception:
