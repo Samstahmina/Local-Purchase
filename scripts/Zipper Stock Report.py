@@ -287,10 +287,8 @@ def main():
     domain = [
         ["product_id.categ_id.complete_name", "ilike", "All / RM"],
         ["company_id", "=", 1],
-        ["receive_date", ">=", month_start.strftime("%Y-%m-%d")],
-        ["receive_date", "<=", month_end.strftime("%Y-%m-%d")],
     ]
-    print(f"Fetching stock report from {month_start} to {month_end} for company 1...")
+    print(f"Fetching stock report for company 1...")
 
     all_records = []
     offset = 0
@@ -304,9 +302,22 @@ def main():
             break
         offset += limit
 
-    print(f"Total records fetched for company 1: {len(all_records)}")
+    print(f"Total records fetched: {len(all_records)}")
 
-    rows = [flatten_record(r) for r in all_records]
+    filtered_records = []
+    for r in all_records:
+        rd = r.get("receive_date", "") or ""
+        if rd:
+            try:
+                dt = datetime.strptime(rd[:10], "%Y-%m-%d").date()
+                if month_start <= dt <= month_end:
+                    filtered_records.append(r)
+            except Exception:
+                pass
+
+    print(f"Filtered records for {month_start} to {month_end}: {len(filtered_records)}")
+
+    rows = [flatten_record(r) for r in filtered_records]
 
     print(f"Connecting to Google Sheets...")
     gc = get_gspread_client()
