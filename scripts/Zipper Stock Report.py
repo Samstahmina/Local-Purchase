@@ -18,6 +18,7 @@ GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
 HEADERS = {"Content-Type": "application/json"}
 
 FIELDS_SPEC = {
+    "company_id": {"fields": {"display_name": {}}},
     "parent_category": {"fields": {"display_name": {}}},
     "product_category": {"fields": {"display_name": {}}},
     "classification_id": {"fields": {"display_name": {}}},
@@ -48,6 +49,7 @@ FIELDS_SPEC = {
 }
 
 FLAT_HEADERS = [
+    "Company",
     "Product",
     "Category",
     "Classification",
@@ -206,6 +208,8 @@ def parse_product_string(raw):
 
 def flatten_record(record):
     row = []
+    company_id = record.get("company_id") or {}
+    row.append(company_id.get("display_name", "") if company_id else "")
     parent_category = record.get("parent_category") or {}
     row.append(parent_category.get("display_name", "") if parent_category else "")
     product_category = record.get("product_category") or {}
@@ -274,7 +278,7 @@ def main():
     else:
         month_end = today.replace(month=today.month + 1, day=1) - timedelta(days=1)
 
-    sheet_name = f"Data_{today.strftime('%B_%y')}"
+    sheet_name = today.strftime("%B-%y")
 
     print(f"Authenticating with Odoo...")
     cookies = odoo_authenticate()
@@ -282,10 +286,11 @@ def main():
 
     domain = [
         ["product_id.categ_id.complete_name", "ilike", "All / RM"],
+        ["company_id", "=", 1],
         ["receive_date", ">=", month_start.strftime("%Y-%m-%d")],
         ["receive_date", "<=", month_end.strftime("%Y-%m-%d")],
     ]
-    print(f"Fetching stock report from {month_start} to {month_end}...")
+    print(f"Fetching stock report from {month_start} to {month_end} for company 1...")
 
     all_records = []
     offset = 0
@@ -299,7 +304,7 @@ def main():
             break
         offset += limit
 
-    print(f"Total records fetched: {len(all_records)}")
+    print(f"Total records fetched for company 1: {len(all_records)}")
 
     rows = [flatten_record(r) for r in all_records]
 
