@@ -45,6 +45,7 @@ FIELDS_SPEC = {
     "product_type": {"fields": {"display_name": {}}},
     "item_category": {"fields": {"display_name": {}}},
     "product_id": {"fields": {"display_name": {}}},
+    "pr_code": {},
     "product_uom": {"fields": {"display_name": {}}},
     "lot_id": {"fields": {"display_name": {}}},
     "location": {"fields": {"display_name": {}}},
@@ -74,7 +75,7 @@ FLAT_HEADERS = [
     "Product Type",
     "Item Type",
     "Item",
-    "Product ID",
+    "Product Code",
     "Unit",
     "Invoice",
     "Location",
@@ -315,7 +316,7 @@ def flatten_record(record, issue_dates):
     row.append(item_category.get("display_name", "") if item_category else "")
     product_id = record.get("product_id") or {}
     row.append(product_id.get("display_name", "") if product_id else "")
-    row.append(product_id.get("id", "") if product_id else "")
+    row.append(cell(record, "pr_code"))
     product_uom = record.get("product_uom") or {}
     row.append(product_uom.get("display_name", "") if product_uom else "")
     lot_id = record.get("lot_id") or {}
