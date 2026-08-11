@@ -82,13 +82,14 @@ def get_worksheet(sh, name):
     try:
         return sh.worksheet(name)
     except gspread.exceptions.WorksheetNotFound:
-        titles = [ws.title for ws in sh.worksheets()]
-        for title in titles:
-            if title.strip().lower() == name.strip().lower():
-                return sh.worksheet(title)
-        raise Exception(
-            f"Worksheet '{name}' not found. Available worksheets: {titles}"
-        )
+        try:
+            return sh.add_worksheet(title=name, rows="1000", cols="30")
+        except gspread.exceptions.APIError:
+            titles = [ws.title for ws in sh.worksheets()]
+            for title in titles:
+                if title.strip().lower() == name.strip().lower():
+                    return sh.worksheet(title)
+            return sh.add_worksheet(title=name, rows="1000", cols="30")
 
 
 def retry_gspread(func, *args, max_retries=5, backoff_factor=2, **kwargs):
@@ -273,7 +274,7 @@ def main():
     else:
         month_end = today.replace(month=today.month + 1, day=1) - timedelta(days=1)
 
-    sheet_name = today.strftime("%B %Y")
+    sheet_name = f"Data_{today.strftime('%B_%y')}"
 
     print(f"Authenticating with Odoo...")
     cookies = odoo_authenticate()
