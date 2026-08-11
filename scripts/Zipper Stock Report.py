@@ -18,7 +18,6 @@ GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
 HEADERS = {"Content-Type": "application/json"}
 
 FIELDS_SPEC = {
-    "company_id": {"fields": {"display_name": {}}},
     "parent_category": {"fields": {"display_name": {}}},
     "product_category": {"fields": {"display_name": {}}},
     "classification_id": {"fields": {"display_name": {}}},
@@ -49,7 +48,6 @@ FIELDS_SPEC = {
 }
 
 FLAT_HEADERS = [
-    "Company",
     "Product",
     "Category",
     "Classification",
@@ -208,8 +206,6 @@ def parse_product_string(raw):
 
 def flatten_record(record):
     row = []
-    company_id = record.get("company_id") or {}
-    row.append(company_id.get("display_name", "") if company_id else "")
     parent_category = record.get("parent_category") or {}
     row.append(parent_category.get("display_name", "") if parent_category else "")
     product_category = record.get("product_category") or {}
@@ -286,7 +282,6 @@ def main():
 
     domain = [
         ["product_id.categ_id.complete_name", "ilike", "All / RM"],
-        ["company_id", "=", 1],
     ]
     print(f"Fetching stock report for company 1...")
 
@@ -303,6 +298,20 @@ def main():
         offset += limit
 
     print(f"Total records fetched: {len(all_records)}")
+
+    if not all_records:
+        domain = [["company_id", "=", 1]]
+        print("No records with category filter, retrying with company_id filter only...")
+        offset = 0
+        while True:
+            result = odoo_web_search_read(cookies, "stock.opening.closing", domain, offset=offset, limit=limit)
+            records = result.get("records", [])
+            all_records.extend(records)
+            print(f"Fetched {len(records)} records at offset {offset}")
+            if len(records) < limit:
+                break
+            offset += limit
+        print(f"Total records after company filter: {len(all_records)}")
 
     filtered_records = []
     for r in all_records:
