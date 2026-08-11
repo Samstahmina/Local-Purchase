@@ -17,6 +17,27 @@ GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
 
 HEADERS = {"Content-Type": "application/json"}
 
+# Odoo stores datetimes in UTC. The company runs on Asia/Dhaka, which is a fixed
+# UTC+6 with no DST, so a plain offset is enough to render issue dates locally.
+LOCAL_UTC_OFFSET = timedelta(hours=6)
+
+ODOO_CONTEXT = {
+    "lang": "en_US",
+    "tz": "Asia/Dhaka",
+    "allowed_company_ids": [1],
+    "current_company_id": 1,
+}
+
+# Same domain as the "RM" filter that Odoo applies by default on this report's
+# list view (search view filter name="rm_stock"), so the sheet matches what a
+# user sees on screen.
+RM_DOMAIN = [["product_id.categ_id.complete_name", "ilike", "All / RM"]]
+
+# Keep only rows that were issued during the period. Set to False to export
+# every row of the report (including untouched stock) with the issue dates
+# still filled in where they exist.
+ONLY_ISSUED_ROWS = True
+
 FIELDS_SPEC = {
     "parent_category": {"fields": {"display_name": {}}},
     "product_category": {"fields": {"display_name": {}}},
@@ -67,6 +88,7 @@ FLAT_HEADERS = [
     "Receive Date",
     "Receive Quantity",
     "Receive Value",
+    "Issue Date",
     "Issue Quantity",
     "Issue Value",
     "Closing Quantity",
@@ -153,45 +175,119 @@ def odoo_authenticate():
     raise Exception(f"Odoo authentication failed: {result}")
 
 
-def odoo_web_search_read(cookies, model, domain, offset=0, limit=80, context_override=None):
+def odoo_call(cookies, model, method, args, kwargs=None, timeout=300):
     url = f"{ODOO_URL}/web/dataset/call_kw"
-    ctx = {
-        "lang": "en_US",
-        "tz": "Asia/Almaty",
-        "uid": 10,
-        "allowed_company_ids": [1],
-        "bin_size": True,
-        "active_model": "stock.forecast.report",
-        "active_id": 92437,
-        "active_ids": [92437],
-        "current_company_id": 1,
-    }
-    if context_override:
-        ctx.update(context_override)
+    call_kwargs = {"context": ODOO_CONTEXT}
+    if kwargs:
+        call_kwargs.update(kwargs)
     payload = {
         "jsonrpc": "2.0",
         "method": "call",
         "params": {
             "model": model,
-            "method": "web_search_read",
-            "args": [],
-            "kwargs": {
-                "specification": FIELDS_SPEC,
-                "offset": offset,
-                "order": "",
-                "limit": limit,
-                "context": ctx,
-                "count_limit": 10001,
-                "domain": domain,
-            },
+            "method": method,
+            "args": args,
+            "kwargs": call_kwargs,
         },
     }
-    resp = requests.post(url, data=json.dumps(payload), headers=HEADERS, cookies=cookies, timeout=60)
+    resp = requests.post(url, data=json.dumps(payload), headers=HEADERS, cookies=cookies, timeout=timeout)
     resp.raise_for_status()
     result = resp.json()
-    if "result" in result:
-        return result["result"]
-    raise Exception(f"Odoo web_search_read failed: {result}")
+    if "error" in result:
+        message = result["error"].get("data", {}).get("message") or result["error"].get("message")
+        raise Exception(f"Odoo {model}.{method} failed: {message}")
+    return result.get("result")
+
+
+def generate_stock_report(cookies, from_date, to_date):
+    """Populate stock.opening.closing for the given window.
+
+    The report table is empty until someone runs the wizard; it is rebuilt on
+    every run rather than accumulating rows. Without this step the script reads
+    whatever the last user happened to generate, or nothing at all.
+
+    from_date behaves as the opening snapshot, so pass the last day of the
+    previous month to cover a full calendar month.
+    """
+    wizard_id = odoo_call(
+        cookies,
+        "stock.forecast.report",
+        "create",
+        [{
+            "report_type": "rmstock",
+            "report_for": "rm",
+            "from_date": from_date.strftime("%Y-%m-%d"),
+            "to_date": to_date.strftime("%Y-%m-%d"),
+        }],
+    )
+    odoo_call(cookies, "stock.forecast.report", "print_date_wise_stock_register", [[wizard_id]])
+    return wizard_id
+
+
+def odoo_web_search_read(cookies, model, domain, offset=0, limit=80):
+    return odoo_call(
+        cookies,
+        model,
+        "web_search_read",
+        [],
+        {
+            "specification": FIELDS_SPEC,
+            "offset": offset,
+            "order": "",
+            "limit": limit,
+            "count_limit": 10001,
+            "domain": domain,
+        },
+    )
+
+
+def utc_to_local_date(value):
+    if not value:
+        return ""
+    try:
+        dt = datetime.strptime(str(value)[:19], "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return str(value)[:10]
+    return (dt + LOCAL_UTC_OFFSET).strftime("%Y-%m-%d")
+
+
+def fetch_issue_dates(cookies, from_date, to_date):
+    """Map (product_id, lot_id) -> sorted list of dates the lot was issued.
+
+    stock.opening.closing has no issue date of its own, so the dates come from
+    the underlying stock.move.line records: a raw-material issue is a done move
+    out of an internal location into a production location.
+    """
+    domain = [
+        ["date", ">=", from_date.strftime("%Y-%m-%d 00:00:00")],
+        ["date", "<=", to_date.strftime("%Y-%m-%d 23:59:59")],
+        ["state", "=", "done"],
+        ["location_id.usage", "=", "internal"],
+        ["location_dest_id.usage", "=", "production"],
+    ]
+    issue_dates = {}
+    offset = 0
+    limit = 1000
+    while True:
+        batch = odoo_call(
+            cookies,
+            "stock.move.line",
+            "search_read",
+            [domain, ["date", "product_id", "lot_id"]],
+            {"offset": offset, "limit": limit, "order": "date"},
+        ) or []
+        for line in batch:
+            product = line.get("product_id") or []
+            lot = line.get("lot_id") or []
+            if not product:
+                continue
+            key = (product[0], lot[0] if lot else 0)
+            issue_dates.setdefault(key, set()).add(utc_to_local_date(line.get("date")))
+        print(f"Fetched {len(batch)} issue move lines at offset {offset}")
+        if len(batch) < limit:
+            break
+        offset += limit
+    return {key: sorted(values) for key, values in issue_dates.items()}
 
 
 def parse_product_string(raw):
@@ -207,7 +303,19 @@ def parse_product_string(raw):
     return raw, ""
 
 
-def flatten_record(record):
+def cell(record, field):
+    """Odoo returns False for unset scalars; write a blank cell instead."""
+    value = record.get(field)
+    return "" if value is False or value is None else value
+
+
+def record_key(record):
+    product_id = record.get("product_id") or {}
+    lot_id = record.get("lot_id") or {}
+    return (product_id.get("id", 0), lot_id.get("id", 0))
+
+
+def flatten_record(record, issue_dates):
     row = []
     parent_category = record.get("parent_category") or {}
     row.append(parent_category.get("display_name", "") if parent_category else "")
@@ -230,24 +338,25 @@ def flatten_record(record):
     row.append(lot_id.get("display_name", "") if lot_id else "")
     location = record.get("location") or {}
     row.append(location.get("display_name", "") if location else "")
-    row.append(record.get("rejected", ""))
-    row.append(record.get("lot_price", ""))
-    row.append(record.get("pur_price", ""))
-    row.append(record.get("landed_cost", ""))
-    row.append(record.get("opening_qty", ""))
-    row.append(record.get("opening_value", ""))
-    row.append(record.get("receive_date", ""))
-    row.append(record.get("receive_qty", ""))
-    row.append(record.get("receive_value", ""))
-    row.append(record.get("issue_qty", ""))
-    row.append(record.get("issue_value", ""))
-    row.append(record.get("cloing_qty", ""))
-    row.append(record.get("cloing_value", ""))
-    row.append(record.get("shipment_mode", ""))
-    row.append(record.get("po_type", ""))
+    row.append(cell(record, "rejected"))
+    row.append(cell(record, "lot_price"))
+    row.append(cell(record, "pur_price"))
+    row.append(cell(record, "landed_cost"))
+    row.append(cell(record, "opening_qty"))
+    row.append(cell(record, "opening_value"))
+    row.append(cell(record, "receive_date"))
+    row.append(cell(record, "receive_qty"))
+    row.append(cell(record, "receive_value"))
+    row.append(", ".join(issue_dates.get(record_key(record), [])))
+    row.append(cell(record, "issue_qty"))
+    row.append(cell(record, "issue_value"))
+    row.append(cell(record, "cloing_qty"))
+    row.append(cell(record, "cloing_value"))
+    row.append(cell(record, "shipment_mode"))
+    row.append(cell(record, "po_type"))
     partner_id = record.get("partner_id") or {}
     row.append(partner_id.get("display_name", "") if partner_id else "")
-    row.append(record.get("po_number", ""))
+    row.append(cell(record, "po_number"))
     return row
 
 
@@ -277,22 +386,30 @@ def main():
     else:
         month_end = today.replace(month=today.month + 1, day=1) - timedelta(days=1)
 
+    # The wizard treats from_date as the opening snapshot and counts movements
+    # after it, so start from the last day of the previous month.
+    from_date = month_start - timedelta(days=1)
+    to_date = month_end
+
     sheet_name = today.strftime("%B-%y")
 
-    print(f"Authenticating with Odoo...")
+    print("Authenticating with Odoo...")
     cookies = odoo_authenticate()
-    print(f"Authenticated successfully (UID: {cookies.get('session_id', 'N/A')}).")
+    print("Authenticated successfully.")
 
-    domain = [
-        ["product_id.categ_id.complete_name", "ilike", "All / RM"],
-    ]
-    print(f"Fetching stock report for company 1...")
+    print(f"Generating stock report for {from_date} to {to_date}...")
+    wizard_id = generate_stock_report(cookies, from_date, to_date)
+    print(f"Report generated (wizard id {wizard_id}).")
+
+    print("Fetching issue dates from stock move lines...")
+    issue_dates = fetch_issue_dates(cookies, from_date, to_date)
+    print(f"Issue dates found for {len(issue_dates)} product/lot combinations.")
 
     all_records = []
     offset = 0
     limit = 80
     while True:
-        result = odoo_web_search_read(cookies, "stock.opening.closing", domain, offset=offset, limit=limit)
+        result = odoo_web_search_read(cookies, "stock.opening.closing", RM_DOMAIN, offset=offset, limit=limit)
         records = result.get("records", [])
         all_records.extend(records)
         print(f"Fetched {len(records)} records at offset {offset}")
@@ -302,70 +419,19 @@ def main():
 
     print(f"Total records fetched: {len(all_records)}")
 
-    fallback_domains = [
-        [["receive_date", ">=", month_start.strftime("%Y-%m-%d")], ["receive_date", "<=", month_end.strftime("%Y-%m-%d")]],
-        [["create_date", ">=", month_start.strftime("%Y-%m-%d")], ["create_date", "<=", month_end.strftime("%Y-%m-%d")]],
-        [["company_id", "=", 1]],
-        [],
-    ]
-
-    for fb_domain in fallback_domains:
-        if all_records:
-            break
-        print(f"Retrying with fallback domain: {fb_domain}")
-        offset = 0
-        while True:
-            result = odoo_web_search_read(cookies, "stock.opening.closing", fb_domain, offset=offset, limit=limit)
-            records = result.get("records", [])
-            all_records.extend(records)
-            print(f"Fetched {len(records)} records at offset {offset}")
-            if len(records) < limit:
-                break
-            offset += limit
-        print(f"Total records after fallback: {len(all_records)}")
-
     if not all_records:
-        print("Trying without active_id context...")
-        fallback_context = {
-            "uid": 302,
-            "active_model": None,
-            "active_id": None,
-            "active_ids": None,
-        }
-        for fb_domain in fallback_domains:
-            if all_records:
-                break
-            print(f"Retrying with user context and domain: {fb_domain}")
-            offset = 0
-            while True:
-                result = odoo_web_search_read(cookies, "stock.opening.closing", fb_domain, offset=offset, limit=limit, context_override=fallback_context)
-                records = result.get("records", [])
-                all_records.extend(records)
-                print(f"Fetched {len(records)} records at offset {offset}")
-                if len(records) < limit:
-                    break
-                offset += limit
-            print(f"Total records with user context: {len(all_records)}")
+        print("Error: the report returned no rows. Check that the wizard ran and that company 1 has RM stock.", file=sys.stderr)
+        sys.exit(1)
 
-    if not all_records:
-        print("No records found with any domain filter. Check Odoo stock.opening.closing data and active_id.")
+    if ONLY_ISSUED_ROWS:
+        selected = [r for r in all_records if (r.get("issue_qty") or 0) != 0]
+        print(f"Rows issued between {from_date} and {to_date}: {len(selected)} of {len(all_records)}")
+    else:
+        selected = all_records
 
-    filtered_records = []
-    for r in all_records:
-        cd = r.get("create_date", "") or ""
-        if cd:
-            try:
-                dt = datetime.strptime(cd[:10], "%Y-%m-%d").date()
-                if month_start <= dt <= month_end:
-                    filtered_records.append(r)
-            except Exception:
-                pass
+    rows = [flatten_record(r, issue_dates) for r in selected]
 
-    print(f"Filtered records for {month_start} to {month_end}: {len(filtered_records)}")
-
-    rows = [flatten_record(r) for r in filtered_records]
-
-    print(f"Connecting to Google Sheets...")
+    print("Connecting to Google Sheets...")
     gc = get_gspread_client()
     ws = get_worksheet_cached(gc, sheet_name)
 
