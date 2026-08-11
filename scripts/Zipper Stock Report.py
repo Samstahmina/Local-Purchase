@@ -153,8 +153,21 @@ def odoo_authenticate():
     raise Exception(f"Odoo authentication failed: {result}")
 
 
-def odoo_web_search_read(cookies, model, domain, offset=0, limit=80):
+def odoo_web_search_read(cookies, model, domain, offset=0, limit=80, context_override=None):
     url = f"{ODOO_URL}/web/dataset/call_kw"
+    ctx = {
+        "lang": "en_US",
+        "tz": "Asia/Almaty",
+        "uid": 10,
+        "allowed_company_ids": [1],
+        "bin_size": True,
+        "active_model": "stock.forecast.report",
+        "active_id": 92437,
+        "active_ids": [92437],
+        "current_company_id": 1,
+    }
+    if context_override:
+        ctx.update(context_override)
     payload = {
         "jsonrpc": "2.0",
         "method": "call",
@@ -167,17 +180,7 @@ def odoo_web_search_read(cookies, model, domain, offset=0, limit=80):
                 "offset": offset,
                 "order": "",
                 "limit": limit,
-                "context": {
-                    "lang": "en_US",
-                    "tz": "Asia/Almaty",
-                    "uid": 10,
-                    "allowed_company_ids": [1],
-                    "bin_size": True,
-                    "active_model": "stock.forecast.report",
-                    "active_id": 92437,
-                    "active_ids": [92437],
-                    "current_company_id": 1,
-                },
+                "context": ctx,
                 "count_limit": 10001,
                 "domain": domain,
             },
@@ -299,19 +302,53 @@ def main():
 
     print(f"Total records fetched: {len(all_records)}")
 
-    if not all_records:
-        domain = [["company_id", "=", 1]]
-        print("No records with category filter, retrying with company_id filter only...")
+    fallback_domains = [
+        [["receive_date", ">=", month_start.strftime("%Y-%m-%d")], ["receive_date", "<=", month_end.strftime("%Y-%m-%d")]],
+        [["create_date", ">=", month_start.strftime("%Y-%m-%d")], ["create_date", "<=", month_end.strftime("%Y-%m-%d")]],
+        [["company_id", "=", 1]],
+        [],
+    ]
+
+    for fb_domain in fallback_domains:
+        if all_records:
+            break
+        print(f"Retrying with fallback domain: {fb_domain}")
         offset = 0
         while True:
-            result = odoo_web_search_read(cookies, "stock.opening.closing", domain, offset=offset, limit=limit)
+            result = odoo_web_search_read(cookies, "stock.opening.closing", fb_domain, offset=offset, limit=limit)
             records = result.get("records", [])
             all_records.extend(records)
             print(f"Fetched {len(records)} records at offset {offset}")
             if len(records) < limit:
                 break
             offset += limit
-        print(f"Total records after company filter: {len(all_records)}")
+        print(f"Total records after fallback: {len(all_records)}")
+
+    if not all_records:
+        print("Trying without active_id context...")
+        fallback_context = {
+            "uid": 302,
+            "active_model": None,
+            "active_id": None,
+            "active_ids": None,
+        }
+        for fb_domain in fallback_domains:
+            if all_records:
+                break
+            print(f"Retrying with user context and domain: {fb_domain}")
+            offset = 0
+            while True:
+                result = odoo_web_search_read(cookies, "stock.opening.closing", fb_domain, offset=offset, limit=limit, context_override=fallback_context)
+                records = result.get("records", [])
+                all_records.extend(records)
+                print(f"Fetched {len(records)} records at offset {offset}")
+                if len(records) < limit:
+                    break
+                offset += limit
+            print(f"Total records with user context: {len(all_records)}")
+
+    if not all_records:
+        print("No records found with any domain filter. Check Odoo stock.opening.closing data and active_id.")
 
     filtered_records = []
     for r in all_records:
