@@ -45,7 +45,6 @@ FIELDS_SPEC = {
     "product_type": {"fields": {"display_name": {}}},
     "item_category": {"fields": {"display_name": {}}},
     "product_id": {"fields": {"display_name": {}}},
-    "pr_code": {},
     "product_uom": {"fields": {"display_name": {}}},
     "lot_id": {"fields": {"display_name": {}}},
     "location": {"fields": {"display_name": {}}},
@@ -75,7 +74,6 @@ FLAT_HEADERS = [
     "Product Type",
     "Item Type",
     "Item",
-    "Item Code",
     "Unit",
     "Invoice",
     "Location",
@@ -290,19 +288,6 @@ def fetch_issue_dates(cookies, from_date, to_date):
     return {key: sorted(values) for key, values in issue_dates.items()}
 
 
-def parse_product_string(raw):
-    if not raw:
-        return "", ""
-    raw = str(raw).strip()
-    start = raw.find("[")
-    end = raw.find("]")
-    if start != -1 and end != -1 and end > start:
-        code = raw[start + 1:end]
-        name = raw[end + 1:].strip()
-        return name, code
-    return raw, ""
-
-
 def cell(record, field):
     """Odoo returns False for unset scalars; write a blank cell instead."""
     value = record.get(field)
@@ -328,10 +313,7 @@ def flatten_record(record, issue_dates):
     item_category = record.get("item_category") or {}
     row.append(item_category.get("display_name", "") if item_category else "")
     product_id = record.get("product_id") or {}
-    raw_name = product_id.get("display_name", "") if product_id else ""
-    pname, pcode = parse_product_string(raw_name)
-    row.append(pname)
-    row.append(pcode)
+    row.append(product_id.get("display_name", "") if product_id else "")
     product_uom = record.get("product_uom") or {}
     row.append(product_uom.get("display_name", "") if product_uom else "")
     lot_id = record.get("lot_id") or {}
