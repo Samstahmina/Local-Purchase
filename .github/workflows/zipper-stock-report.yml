@@ -1,9 +1,20 @@
-name: Daily Zipper Stock Report
+name: Zipper Stock Report
 
 on:
+  # Every 30 minutes during Dhaka working hours. Cron is UTC and Dhaka is
+  # UTC+6, so 02:00-16:30 UTC covers 08:00-22:30 local. GitHub queues
+  # scheduled runs on shared infrastructure, so expect some minutes of drift.
   schedule:
-    - cron: "0 0 * * *"
+    - cron: "*/30 2-16 * * *"
   workflow_dispatch:
+
+# Never let two runs overlap. Each one regenerates the shared
+# stock.opening.closing table in Odoo and rewrites the whole sheet, so a
+# second run starting mid-write would corrupt the output. Queue instead of
+# cancelling, so an in-flight run is always allowed to finish its write.
+concurrency:
+  group: zipper-stock-report
+  cancel-in-progress: false
 
 jobs:
   fetch-and-update:
