@@ -3,7 +3,7 @@ import sys
 import json
 import time
 import requests
-from datetime import datetime, date, timedelta
+from datetime import date
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -17,10 +17,6 @@ GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
 
 HEADERS = {"Content-Type": "application/json"}
 
-# Odoo stores datetimes in UTC. The company runs on Asia/Dhaka, which is a fixed
-# UTC+6 with no DST, so a plain offset is enough to render issue dates locally.
-LOCAL_UTC_OFFSET = timedelta(hours=6)
-
 ODOO_CONTEXT = {
     "lang": "en_US",
     "tz": "Asia/Dhaka",
@@ -32,11 +28,6 @@ ODOO_CONTEXT = {
 # list view (search view filter name="rm_stock"), so the sheet matches what a
 # user sees on screen.
 RM_DOMAIN = [["product_id.categ_id.complete_name", "ilike", "All / RM"]]
-
-# Keep only rows that were issued during the period. Set to False to export
-# every row of the report (including untouched stock) with the issue dates
-# still filled in where they exist.
-ONLY_ISSUED_ROWS = True
 
 FIELDS_SPEC = {
     "parent_category": {"fields": {"display_name": {}}},
@@ -88,7 +79,6 @@ FLAT_HEADERS = [
     "Receive Date",
     "Receive Quantity",
     "Receive Value",
-    "Issue Date",
     "Issue Quantity",
     "Issue Value",
     "Closing Quantity",
@@ -241,68 +231,13 @@ def odoo_web_search_read(cookies, model, domain, offset=0, limit=80):
     )
 
 
-def utc_to_local_date(value):
-    if not value:
-        return ""
-    try:
-        dt = datetime.strptime(str(value)[:19], "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return str(value)[:10]
-    return (dt + LOCAL_UTC_OFFSET).strftime("%Y-%m-%d")
-
-
-def fetch_issue_dates(cookies, from_date, to_date):
-    """Map (product_id, lot_id) -> sorted list of dates the lot was issued.
-
-    stock.opening.closing has no issue date of its own, so the dates come from
-    the underlying stock.move.line records: a raw-material issue is a done move
-    out of an internal location into a production location.
-    """
-    domain = [
-        ["date", ">=", from_date.strftime("%Y-%m-%d 00:00:00")],
-        ["date", "<=", to_date.strftime("%Y-%m-%d 23:59:59")],
-        ["state", "=", "done"],
-        ["location_id.usage", "=", "internal"],
-        ["location_dest_id.usage", "=", "production"],
-    ]
-    issue_dates = {}
-    offset = 0
-    limit = 1000
-    while True:
-        batch = odoo_call(
-            cookies,
-            "stock.move.line",
-            "search_read",
-            [domain, ["date", "product_id", "lot_id"]],
-            {"offset": offset, "limit": limit, "order": "date"},
-        ) or []
-        for line in batch:
-            product = line.get("product_id") or []
-            lot = line.get("lot_id") or []
-            if not product:
-                continue
-            key = (product[0], lot[0] if lot else 0)
-            issue_dates.setdefault(key, set()).add(utc_to_local_date(line.get("date")))
-        print(f"Fetched {len(batch)} issue move lines at offset {offset}")
-        if len(batch) < limit:
-            break
-        offset += limit
-    return {key: sorted(values) for key, values in issue_dates.items()}
-
-
 def cell(record, field):
     """Odoo returns False for unset scalars; write a blank cell instead."""
     value = record.get(field)
     return "" if value is False or value is None else value
 
 
-def record_key(record):
-    product_id = record.get("product_id") or {}
-    lot_id = record.get("lot_id") or {}
-    return (product_id.get("id", 0), lot_id.get("id", 0))
-
-
-def flatten_record(record, issue_dates):
+def flatten_record(record):
     row = []
     parent_category = record.get("parent_category") or {}
     row.append(parent_category.get("display_name", "") if parent_category else "")
@@ -332,7 +267,6 @@ def flatten_record(record, issue_dates):
     row.append(cell(record, "receive_date"))
     row.append(cell(record, "receive_qty"))
     row.append(cell(record, "receive_value"))
-    row.append(", ".join(issue_dates.get(record_key(record), [])))
     row.append(cell(record, "issue_qty"))
     row.append(cell(record, "issue_value"))
     row.append(cell(record, "cloing_qty"))
@@ -365,16 +299,12 @@ def main():
         sys.exit(1)
 
     today = date.today()
-    month_start = today.replace(day=1)
-    if today.month == 12:
-        month_end = today.replace(year=today.year + 1, month=1, day=1) - timedelta(days=1)
-    else:
-        month_end = today.replace(month=today.month + 1, day=1) - timedelta(days=1)
 
-    # The wizard treats from_date as the opening snapshot and counts movements
-    # after it, so start from the last day of the previous month.
-    from_date = month_start - timedelta(days=1)
-    to_date = month_end
+    # Same window the staff enter in the report wizard: first of the month to
+    # today. Anything else changes Opening and Closing Quantity, so the sheet
+    # would no longer match the report they see on screen.
+    from_date = today.replace(day=1)
+    to_date = today
 
     sheet_name = today.strftime("%B-%y")
 
@@ -385,10 +315,6 @@ def main():
     print(f"Generating stock report for {from_date} to {to_date}...")
     wizard_id = generate_stock_report(cookies, from_date, to_date)
     print(f"Report generated (wizard id {wizard_id}).")
-
-    print("Fetching issue dates from stock move lines...")
-    issue_dates = fetch_issue_dates(cookies, from_date, to_date)
-    print(f"Issue dates found for {len(issue_dates)} product/lot combinations.")
 
     all_records = []
     offset = 0
@@ -408,13 +334,7 @@ def main():
         print("Error: the report returned no rows. Check that the wizard ran and that company 1 has RM stock.", file=sys.stderr)
         sys.exit(1)
 
-    if ONLY_ISSUED_ROWS:
-        selected = [r for r in all_records if (r.get("issue_qty") or 0) != 0]
-        print(f"Rows issued between {from_date} and {to_date}: {len(selected)} of {len(all_records)}")
-    else:
-        selected = all_records
-
-    rows = [flatten_record(r, issue_dates) for r in selected]
+    rows = [flatten_record(r) for r in all_records]
 
     print("Connecting to Google Sheets...")
     gc = get_gspread_client()
