@@ -10,10 +10,12 @@ same capture was taken from:
     AND state = 'purchase'
     AND company_id in (1, 2, 3)
 
-The one departure from the template: Odoo's "Order Lines/Last Purchase" packs
-an amount, a currency and the originating PO reference into one string. Column
-W keeps just the amount, the currency moves to its own "Currency-Last Purchase"
-column beside it, and the PO reference is dropped.
+Two departures from the template. Odoo's "Order Lines/Last Purchase" packs an
+amount, a currency and the originating PO reference into one string, so it is
+split into an amount column and a "Currency-Last Purchase" column and the PO
+reference is dropped. And six of the template's columns are not wanted here:
+Priority, PI No., Order Status, Source Document, Gate Entry and Order
+Lines/Product/Product Category.
 
 Odoo explodes `order_line/*` columns into one row per order line, so an order
 with three lines produces three rows with the order-level columns repeated.
@@ -63,8 +65,9 @@ ODOO_CONTEXT = {
 }
 
 # ---------------------------------------------------------------------------
-# Column layout, verbatim from /web/export/namelist for export_id 572, plus the
-# split-out last-purchase currency. (odoo field name, sheet header, source),
+# Column layout: the order and labels of /web/export/namelist for export_id
+# 572, minus the six unwanted columns and plus the split-out last-purchase
+# currency. (odoo field name, sheet header, source),
 # where source says which record the value is read off and how:
 #   order / line             - straight off the order or its line
 #   order_product            - off the product the order points at
@@ -73,20 +76,15 @@ ODOO_CONTEXT = {
 #                              packed last_purchase_price string
 # ---------------------------------------------------------------------------
 COLUMNS = [
-    ("priority", "Priority", "order"),
     ("name", "Order Reference", "order"),
     ("partner_id", "Vendor", "order"),
-    ("x_studio_pi_no", "PI No.", "order"),
     ("create_date", "Created on", "order"),
-    ("x_studio_order_status", "Order Status", "order"),
     ("company_id", "Company", "order"),
     ("create_uid", "Created by", "order"),
     ("last_approver", "Last Approver", "order"),
     ("date_approve", "Confirmation Date", "order"),
-    ("origin", "Source Document", "order"),
     ("amount_total", "Total", "order"),
     ("x_studio_currency", "Currency.", "order"),
-    ("x_studio_gate_entry", "Gate Entry", "order"),
     ("state", "Status", "order"),
     ("payment_term_id", "Payment Terms", "order"),
     ("product_uom_qty", "Order Lines/Total Quantity", "line"),
@@ -95,12 +93,11 @@ COLUMNS = [
     ("qty_received", "Order Lines/Received Qty", "line"),
     ("price_unit", "Order Lines/Unit Price", "line"),
     ("product_uom", "Order Lines/Unit of Measure", "line"),
-    ("last_purchase_price", "Order Lines/Last Purchase", "last_purchase_value"),
+    ("last_purchase_price", "Order Lines/Last Purchase Price", "last_purchase_value"),
     ("last_purchase_price", "Currency-Last Purchase", "last_purchase_currency"),
     ("categ_type", "Product/Category Type/Type of Categories", "order_product"),
     ("incoterm_id", "Incoterm", "order"),
     ("itemtype", "Item Types", "order"),
-    ("categ_id", "Order Lines/Product/Product Category", "line_product"),
     ("shipment_mode", "Shipment Mode", "order"),
 ]
 
@@ -393,16 +390,23 @@ def main():
         else:
             line_fields.append(actual)
 
-    order_product_field = resolve(order_meta, "product_id")
+    # Only reach for a product when a product-sourced column survives; with
+    # none, the extra product read is pure waste.
+    order_product_names = [n for n, _, source in COLUMNS if source == "order_product"]
+    line_product_names = [n for n, _, source in COLUMNS if source == "line_product"]
+
+    order_product_field = resolve(order_meta, "product_id") if order_product_names else None
     if order_product_field:
         order_fields.append(order_product_field)
-    line_product_field = resolve(line_meta, "product_id")
+    line_product_field = resolve(line_meta, "product_id") if line_product_names else None
 
-    product_fields = [f for f in ("categ_id", "categ_type") if f in product_meta]
+    product_fields = [
+        f for f in dict.fromkeys(order_product_names + line_product_names) if f in product_meta
+    ]
 
-    # The list view filter, verbatim from the capture, narrowed to company 1.
-    # The context's allowed_company_ids only steers record rules, so the
-    # company is pinned in the domain instead of relied on implicitly.
+    # The list view filter, verbatim from the capture, narrowed to the
+    # companies above. The context's allowed_company_ids only steers record
+    # rules, so the companies are pinned in the domain rather than relied on.
     end_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     domain = [
         "&", "&", "&",
