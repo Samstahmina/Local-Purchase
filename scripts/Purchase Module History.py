@@ -17,10 +17,11 @@ reference is dropped. And six of the template's columns are not wanted here:
 Priority, PI No., Order Status, Source Document, Gate Entry and Order
 Lines/Product/Product Category.
 
-On top of the template there is a Responsible column, holding the PO's "Add a
-section" headings -- where the requisitioning person and APR number are
-written -- joined with ", " in the order they appear in the PO. Every row of a
-PO carries the same value.
+On top of the template there is a Responsible column, holding the "Add a
+section" heading -- where the requisitioning person and APR number are
+written -- that each product line sits under. A heading covers every line
+beneath it until the next heading, so consecutive rows repeat a heading for as
+many products as it covers. Lines above the first heading stay blank.
 
 Odoo explodes `order_line/*` columns into one row per order line, so an order
 with three lines produces three rows with the order-level columns repeated.
@@ -79,7 +80,7 @@ ODOO_CONTEXT = {
 #   line_product             - off the product the line points at
 #   last_purchase_*          - the amount or currency parsed out of the line's
 #                              packed last_purchase_price string
-#   sections                 - the order's "Add a section" headings, joined
+#   sections                 - the "Add a section" heading the line sits under
 # ---------------------------------------------------------------------------
 COLUMNS = [
     ("name", "Order Reference", "order"),
@@ -123,9 +124,8 @@ DATETIME_FIELDS = {"create_date", "date_approve"}
 # real lines and are told apart by display_type; a normal line leaves it unset.
 # The heading text an "Add a section" row carries is just its `name`. Those
 # headings are where the requisitioning person and APR number get written, so
-# they become the Responsible column, joined in the order they appear in the PO.
+# each one fills the Responsible column for the product lines it covers.
 SECTION_DISPLAY_TYPE = "line_section"
-SECTION_SEPARATOR = ", "
 LINE_BOOKKEEPING_FIELDS = ["display_type", "name", "sequence"]
 
 # Which model each column's source reads from, for the field-existence check.
@@ -461,28 +461,37 @@ def main():
             )
     print(f"Total order lines: {len(lines)}")
 
-    # Sections are rows in the same table, so they have to be pulled out before
-    # anything counts as a product line -- otherwise each heading would land in
-    # the sheet as a row with no product on it.
-    lines_by_order = {}
-    sections_by_order = {}
-    section_count = 0
+    grouped = {}
     for line in lines:
         order_id = line.get("order_id")
         oid = order_id[0] if isinstance(order_id, list) and order_id else order_id
-        if line.get("display_type") == SECTION_DISPLAY_TYPE:
-            heading = (line.get("name") or "").strip()
-            if heading:
-                sections_by_order.setdefault(oid, []).append(heading)
-            section_count += 1
-        elif line.get("display_type"):
-            continue  # a note row; carries no product either
-        else:
-            lines_by_order.setdefault(oid, []).append(line)
+        grouped.setdefault(oid, []).append(line)
+
+    # A section heading governs every product line beneath it until the next
+    # heading, so walking each PO's lines in their on-screen order and carrying
+    # the last heading forward reproduces what the PO looks like. The heading
+    # rows themselves are dropped: they hold no product, so leaving them in
+    # would put a blank row in the sheet for every section.
+    lines_by_order = {}
+    section_count = 0
+    orders_with_sections = set()
+    for oid, order_lines in grouped.items():
+        order_lines.sort(key=lambda l: (l.get("sequence") or 0, l.get("id") or 0))
+        current_section = ""
+        for line in order_lines:
+            if line.get("display_type") == SECTION_DISPLAY_TYPE:
+                current_section = (line.get("name") or "").strip()
+                section_count += 1
+                orders_with_sections.add(oid)
+            elif line.get("display_type"):
+                continue  # a note row; carries no product either
+            else:
+                line["_section"] = current_section
+                lines_by_order.setdefault(oid, []).append(line)
 
     print(
         f"Of those, {section_count} are section headings across "
-        f"{len(sections_by_order)} orders."
+        f"{len(orders_with_sections)} orders."
     )
 
     # One extra read resolves both product-derived columns.
@@ -511,7 +520,6 @@ def main():
     rows = []
     for order in orders:
         order_product = product_of(order, order_product_field)
-        responsible = SECTION_SEPARATOR.join(sections_by_order.get(order["id"], []))
         for line in lines_by_order.get(order["id"], [None]):
             line_product = product_of(line, line_product_field) if line else {}
             row = []
@@ -531,7 +539,7 @@ def main():
                     )
                     row.append(amount if source == "last_purchase_value" else currency)
                 elif source == "sections":
-                    row.append(responsible)
+                    row.append(line.get("_section", "") if line else "")
                 elif source == "order_product":
                     row.append(format_value(order_product.get(name), name, product_meta))
                 else:
