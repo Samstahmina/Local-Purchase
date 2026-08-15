@@ -17,6 +17,11 @@ reference is dropped. And six of the template's columns are not wanted here:
 Priority, PI No., Order Status, Source Document, Gate Entry and Order
 Lines/Product/Product Category.
 
+On top of the template there is a Responsible column, holding the PO's "Add a
+section" headings -- where the requisitioning person and APR number are
+written -- joined with ", " in the order they appear in the PO. Every row of a
+PO carries the same value.
+
 Odoo explodes `order_line/*` columns into one row per order line, so an order
 with three lines produces three rows with the order-level columns repeated.
 Orders with no lines still produce one row with the line columns blank.
@@ -67,13 +72,14 @@ ODOO_CONTEXT = {
 # ---------------------------------------------------------------------------
 # Column layout: the order and labels of /web/export/namelist for export_id
 # 572, minus the six unwanted columns and plus the split-out last-purchase
-# currency. (odoo field name, sheet header, source),
+# currency and the Responsible column. (odoo field name, sheet header, source),
 # where source says which record the value is read off and how:
 #   order / line             - straight off the order or its line
 #   order_product            - off the product the order points at
 #   line_product             - off the product the line points at
 #   last_purchase_*          - the amount or currency parsed out of the line's
 #                              packed last_purchase_price string
+#   sections                 - the order's "Add a section" headings, joined
 # ---------------------------------------------------------------------------
 COLUMNS = [
     ("name", "Order Reference", "order"),
@@ -99,6 +105,7 @@ COLUMNS = [
     ("incoterm_id", "Incoterm", "order"),
     ("itemtype", "Item Types", "order"),
     ("shipment_mode", "Shipment Mode", "order"),
+    ("section_names", "Responsible", "sections"),
 ]
 
 FLAT_HEADERS = [label for _, label, _ in COLUMNS]
@@ -111,6 +118,15 @@ FIELD_ALIASES = {
 }
 
 DATETIME_FIELDS = {"create_date", "date_approve"}
+
+# "Add a section" and "Add a note" rows are stored in order_line alongside the
+# real lines and are told apart by display_type; a normal line leaves it unset.
+# The heading text an "Add a section" row carries is just its `name`. Those
+# headings are where the requisitioning person and APR number get written, so
+# they become the Responsible column, joined in the order they appear in the PO.
+SECTION_DISPLAY_TYPE = "line_section"
+SECTION_SEPARATOR = ", "
+LINE_BOOKKEEPING_FIELDS = ["display_type", "name", "sequence"]
 
 # Which model each column's source reads from, for the field-existence check.
 SOURCE_MODEL = {
@@ -426,19 +442,48 @@ def main():
     lines = []
     if orders:
         order_ids = [o["id"] for o in orders]
-        wanted = sorted(set(line_fields + ["order_id"] + ([line_product_field] if line_product_field else [])))
+        wanted = set(line_fields) | {"order_id"}
+        if line_product_field:
+            wanted.add(line_product_field)
+        wanted |= {f for f in LINE_BOOKKEEPING_FIELDS if f in line_meta}
+        if "display_type" not in line_meta:
+            print("  warning: order lines have no display_type; Responsible will be blank")
         for i in range(0, len(order_ids), 500):
             chunk = order_ids[i:i + 500]
             lines.extend(
-                search_read(cookies, "purchase.order.line", [["order_id", "in", chunk]], wanted)
+                search_read(
+                    cookies,
+                    "purchase.order.line",
+                    [["order_id", "in", chunk]],
+                    sorted(wanted),
+                    order="sequence, id",
+                )
             )
     print(f"Total order lines: {len(lines)}")
 
+    # Sections are rows in the same table, so they have to be pulled out before
+    # anything counts as a product line -- otherwise each heading would land in
+    # the sheet as a row with no product on it.
     lines_by_order = {}
+    sections_by_order = {}
+    section_count = 0
     for line in lines:
         order_id = line.get("order_id")
         oid = order_id[0] if isinstance(order_id, list) and order_id else order_id
-        lines_by_order.setdefault(oid, []).append(line)
+        if line.get("display_type") == SECTION_DISPLAY_TYPE:
+            heading = (line.get("name") or "").strip()
+            if heading:
+                sections_by_order.setdefault(oid, []).append(heading)
+            section_count += 1
+        elif line.get("display_type"):
+            continue  # a note row; carries no product either
+        else:
+            lines_by_order.setdefault(oid, []).append(line)
+
+    print(
+        f"Of those, {section_count} are section headings across "
+        f"{len(sections_by_order)} orders."
+    )
 
     # One extra read resolves both product-derived columns.
     products = {}
@@ -466,6 +511,7 @@ def main():
     rows = []
     for order in orders:
         order_product = product_of(order, order_product_field)
+        responsible = SECTION_SEPARATOR.join(sections_by_order.get(order["id"], []))
         for line in lines_by_order.get(order["id"], [None]):
             line_product = product_of(line, line_product_field) if line else {}
             row = []
@@ -484,6 +530,8 @@ def main():
                         line.get(actual) if (line and actual) else ""
                     )
                     row.append(amount if source == "last_purchase_value" else currency)
+                elif source == "sections":
+                    row.append(responsible)
                 elif source == "order_product":
                     row.append(format_value(order_product.get(name), name, product_meta))
                 else:
