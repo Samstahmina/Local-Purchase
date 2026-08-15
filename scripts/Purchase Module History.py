@@ -8,7 +8,12 @@ same capture was taken from:
     date_approve >= 2024-12-31 18:00:24 UTC  (2025-01-01 00:00 Dhaka)
     AND date_approve <= now
     AND state = 'purchase'
-    AND company_id = 1
+    AND company_id in (1, 2, 3)
+
+The one departure from the template: Odoo's "Order Lines/Last Purchase" packs
+an amount, a currency and the originating PO reference into one string. Column
+W keeps just the amount, the currency moves to its own "Currency-Last Purchase"
+column beside it, and the PO reference is dropped.
 
 Odoo explodes `order_line/*` columns into one row per order line, so an order
 with three lines produces three rows with the order-level columns repeated.
@@ -16,6 +21,7 @@ Orders with no lines still produce one row with the line columns blank.
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -44,22 +50,27 @@ TZ_OFFSET = timedelta(hours=6)
 # hold the same history the manual download produces.
 START_UTC = "2024-12-31 18:00:24"
 
-# Only the first company's orders belong in this sheet.
-COMPANY_ID = 1
+# Companies whose orders belong in this sheet.
+COMPANY_IDS = [1, 2, 3]
 
 HEADERS = {"Content-Type": "application/json"}
 
 ODOO_CONTEXT = {
     "lang": "en_US",
     "tz": "Asia/Almaty",
-    "allowed_company_ids": [1],
-    "current_company_id": 1,
+    "allowed_company_ids": COMPANY_IDS,
+    "current_company_id": COMPANY_IDS[0],
 }
 
 # ---------------------------------------------------------------------------
-# Column layout, verbatim from /web/export/namelist for export_id 572.
-# (odoo field path, sheet header, source) where source is "order", "line",
-# "order_product" or "line_product".
+# Column layout, verbatim from /web/export/namelist for export_id 572, plus the
+# split-out last-purchase currency. (odoo field name, sheet header, source),
+# where source says which record the value is read off and how:
+#   order / line             - straight off the order or its line
+#   order_product            - off the product the order points at
+#   line_product             - off the product the line points at
+#   last_purchase_*          - the amount or currency parsed out of the line's
+#                              packed last_purchase_price string
 # ---------------------------------------------------------------------------
 COLUMNS = [
     ("priority", "Priority", "order"),
@@ -84,7 +95,8 @@ COLUMNS = [
     ("qty_received", "Order Lines/Received Qty", "line"),
     ("price_unit", "Order Lines/Unit Price", "line"),
     ("product_uom", "Order Lines/Unit of Measure", "line"),
-    ("last_purchase_price", "Order Lines/Last Purchase", "line"),
+    ("last_purchase_price", "Order Lines/Last Purchase", "last_purchase_value"),
+    ("last_purchase_price", "Currency-Last Purchase", "last_purchase_currency"),
     ("categ_type", "Product/Category Type/Type of Categories", "order_product"),
     ("incoterm_id", "Incoterm", "order"),
     ("itemtype", "Item Types", "order"),
@@ -102,6 +114,40 @@ FIELD_ALIASES = {
 }
 
 DATETIME_FIELDS = {"create_date", "date_approve"}
+
+# Which model each column's source reads from, for the field-existence check.
+SOURCE_MODEL = {
+    "order": "order",
+    "line": "line",
+    "last_purchase_value": "line",
+    "last_purchase_currency": "line",
+}
+
+# "0.00 BDT (P09183)" -> amount "0.00", currency "BDT". The currency pattern
+# needs 2-5 *consecutive* capitals, so a reference like P09183 or PO9183 can
+# never match it: the letters there are butted against digits.
+LAST_PURCHASE_AMOUNT = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+LAST_PURCHASE_CURRENCY = re.compile(r"\b[A-Z]{2,5}\b")
+
+
+def parse_last_purchase(raw):
+    """Split the packed last-purchase string into (amount, currency).
+
+    The amount keeps whatever decimals Odoo wrote, so "0.00" stays "0.00"
+    rather than collapsing to 0; thousands separators are stripped so the
+    column stays usable in a formula. The PO reference is discarded.
+    """
+    if raw is None or raw is False or raw == "":
+        return "", ""
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return f"{raw:.2f}", ""
+    text = str(raw)
+    amount = LAST_PURCHASE_AMOUNT.search(text)
+    currency = LAST_PURCHASE_CURRENCY.search(text)
+    return (
+        amount.group(0).replace(",", "") if amount else "",
+        currency.group(0) if currency else "",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -333,15 +379,16 @@ def main():
     order_fields, line_fields = [], []
     resolved = {}
     for name, label, source in COLUMNS:
-        meta = {"order": order_meta, "line": line_meta}.get(source)
-        if meta is None:
+        model = SOURCE_MODEL.get(source)
+        if model is None:
             resolved[(source, name)] = name  # product lookups, checked below
             continue
+        meta = order_meta if model == "order" else line_meta
         actual = resolve(meta, name)
         resolved[(source, name)] = actual
         if actual is None:
             print(f"  note: '{name}' ({label}) is not on this database; column left blank")
-        elif source == "order":
+        elif model == "order":
             order_fields.append(actual)
         else:
             line_fields.append(actual)
@@ -362,10 +409,10 @@ def main():
         ["date_approve", ">=", START_UTC],
         ["date_approve", "<=", end_utc],
         ["state", "=", "purchase"],
-        ["company_id", "=", COMPANY_ID],
+        ["company_id", "in", COMPANY_IDS],
     ]
     print(
-        f"Fetching confirmed purchase orders for company {COMPANY_ID}, "
+        f"Fetching confirmed purchase orders for companies {COMPANY_IDS}, "
         f"{START_UTC} to {end_utc} UTC..."
     )
 
@@ -428,6 +475,11 @@ def main():
                         if (line and actual)
                         else ""
                     )
+                elif source in ("last_purchase_value", "last_purchase_currency"):
+                    amount, currency = parse_last_purchase(
+                        line.get(actual) if (line and actual) else ""
+                    )
+                    row.append(amount if source == "last_purchase_value" else currency)
                 elif source == "order_product":
                     row.append(format_value(order_product.get(name), name, product_meta))
                 else:
