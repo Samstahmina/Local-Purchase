@@ -1,0 +1,43 @@
+name: Purchase Module History
+
+on:
+  # 02:00 UTC is 08:00 in Dhaka, so the sheet is fresh at the start of the day.
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "First confirmation date to include (YYYY-MM-DD, Dhaka time)"
+        required: false
+        default: "2025-01-01"
+
+# The script rewrites the whole sheet, so a second run starting mid-write would
+# corrupt the output. Queue instead of cancelling so an in-flight write finishes.
+concurrency:
+  group: purchase-module-history
+  cancel-in-progress: false
+
+jobs:
+  fetch-and-update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run purchase module history script
+        env:
+          ODOO_DB: ${{ secrets.ODOO_DB }}
+          ODOO_USERNAME: ${{ secrets.ODOO_USERNAME }}
+          ODOO_PASSWORD: ${{ secrets.ODOO_PASSWORD }}
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDS }}
+          PURCHASE_START_DATE: ${{ inputs.start_date || '2025-01-01' }}
+        run: python "scripts/Purchase Module History.py"
