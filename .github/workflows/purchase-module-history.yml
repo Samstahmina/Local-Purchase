@@ -5,11 +5,6 @@ on:
   schedule:
     - cron: "0 2 * * *"
   workflow_dispatch:
-    inputs:
-      start_date:
-        description: "First confirmation date to include (YYYY-MM-DD, Dhaka time)"
-        required: false
-        default: "2025-01-01"
 
 # The script rewrites the whole sheet, so a second run starting mid-write would
 # corrupt the output. Queue instead of cancelling so an in-flight write finishes.
@@ -39,5 +34,4 @@ jobs:
           ODOO_USERNAME: ${{ secrets.ODOO_USERNAME }}
           ODOO_PASSWORD: ${{ secrets.ODOO_PASSWORD }}
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDS }}
-          PURCHASE_START_DATE: ${{ inputs.start_date || '2025-01-01' }}
         run: python "scripts/Purchase Module History.py"

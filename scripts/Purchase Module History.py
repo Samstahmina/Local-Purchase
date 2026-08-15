@@ -5,7 +5,10 @@ template (ir.exports id 572, "Procurement 1") captured in
 `Purchase Module History.har`; the record filter comes from the list view the
 same capture was taken from:
 
-    date_approve >= <start>  AND  date_approve <= now  AND  state = 'purchase'
+    date_approve >= 2024-12-31 18:00:24 UTC  (2025-01-01 00:00 Dhaka)
+    AND date_approve <= now
+    AND state = 'purchase'
+    AND company_id = 1
 
 Odoo explodes `order_line/*` columns into one row per order line, so an order
 with three lines produces three rows with the order-level columns repeated.
@@ -36,9 +39,13 @@ GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
 # so every datetime crossing the wire gets shifted by this offset.
 TZ_OFFSET = timedelta(hours=6)
 
-# Local calendar date the history starts at. The capture used 2025-01-01 local,
-# which Odoo sent as "2024-12-31 18:00:24" UTC.
-START_DATE = os.environ.get("PURCHASE_START_DATE", "").strip() or "2025-01-01"
+# Start of the window, exactly as the captured request sent it: 2025-01-01
+# 00:00 Dhaka expressed in UTC. Fixed, not configurable — the sheet is meant to
+# hold the same history the manual download produces.
+START_UTC = "2024-12-31 18:00:24"
+
+# Only the first company's orders belong in this sheet.
+COMPANY_ID = 1
 
 HEADERS = {"Content-Type": "application/json"}
 
@@ -346,18 +353,21 @@ def main():
 
     product_fields = [f for f in ("categ_id", "categ_type") if f in product_meta]
 
-    # The list view filter, verbatim from the capture.
-    start_utc = (
-        datetime.strptime(START_DATE, "%Y-%m-%d") - TZ_OFFSET
-    ).strftime("%Y-%m-%d %H:%M:%S")
+    # The list view filter, verbatim from the capture, narrowed to company 1.
+    # The context's allowed_company_ids only steers record rules, so the
+    # company is pinned in the domain instead of relied on implicitly.
     end_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     domain = [
-        "&", "&",
-        ["date_approve", ">=", start_utc],
+        "&", "&", "&",
+        ["date_approve", ">=", START_UTC],
         ["date_approve", "<=", end_utc],
         ["state", "=", "purchase"],
+        ["company_id", "=", COMPANY_ID],
     ]
-    print(f"Fetching confirmed purchase orders, {start_utc} to {end_utc} UTC...")
+    print(
+        f"Fetching confirmed purchase orders for company {COMPANY_ID}, "
+        f"{START_UTC} to {end_utc} UTC..."
+    )
 
     orders = search_read(cookies, "purchase.order", domain, sorted(set(order_fields)))
     print(f"Total orders: {len(orders)}")
