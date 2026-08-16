@@ -27,6 +27,13 @@ kept, everything else is ignored, and consecutive kept headings are joined
 together. A kept heading (or group of them) covers every line beneath it
 until the next kept heading. Lines above the first kept heading stay blank.
 
+There is also an Order Lines/Last Receiving Date column, next to Received
+Qty. It reproduces going to a PO's Receipt tab and reading off each
+product's date there: the latest date among that line's Done stock moves,
+since a line can be received across several partial deliveries and only the
+most recent one matters. Lines never received (or before receiving starts)
+stay blank.
+
 Odoo explodes `order_line/*` columns into one row per order line, so an order
 with three lines produces three rows with the order-level columns repeated.
 Orders with no lines still produce one row with the line columns blank.
@@ -85,6 +92,8 @@ ODOO_CONTEXT = {
 #   last_purchase_*          - the amount or currency parsed out of the line's
 #                              packed last_purchase_price string
 #   sections                 - the "Add a section" heading the line sits under
+#   receiving_date            - the most recent Done stock move date for the
+#                              line's product, across any partial receipts
 # ---------------------------------------------------------------------------
 COLUMNS = [
     ("name", "Order Reference", "order"),
@@ -101,6 +110,7 @@ COLUMNS = [
     ("product_id", "Order Lines/Product", "line"),
     ("po_type", "PO Type", "order"),
     ("qty_received", "Order Lines/Received Qty", "line"),
+    ("last_receiving_date", "Order Lines/Last Receiving Date", "receiving_date"),
     ("price_unit", "Order Lines/Unit Price", "line"),
     ("product_uom", "Order Lines/Unit of Measure", "line"),
     ("last_purchase_price", "Order Lines/Last Purchase Price", "last_purchase_value"),
@@ -120,6 +130,12 @@ FIELD_ALIASES = {
     "product_uom_qty": ["product_uom_qty", "product_qty"],
     "product_uom": ["product_uom", "product_uom_id"],
 }
+
+# stock.move fields used to find each line's last receiving date: the link
+# back to the purchase order line, and the move's date -- which holds the
+# scheduled date until the move is done, then the actual processing date.
+MOVE_LINE_FIELD = "purchase_line_id"
+MOVE_DATE_FIELD = "date"
 
 DATETIME_FIELDS = {"create_date", "date_approve"}
 
@@ -533,6 +549,37 @@ def main():
         f"{len(orders_with_sections)} orders."
     )
 
+    # A product on a PO can be received across several partial deliveries, so
+    # the last Done stock move for the line is what "received" means here.
+    move_meta = fields_get(cookies, "stock.move")
+    move_line_field = resolve(move_meta, MOVE_LINE_FIELD)
+    move_date_field = resolve(move_meta, MOVE_DATE_FIELD)
+    if not move_line_field or not move_date_field:
+        print("  note: stock.move is missing the fields needed for receiving dates; column left blank")
+    else:
+        receiving_line_ids = [l["id"] for order_lines in lines_by_order.values() for l in order_lines]
+        last_receiving = {}
+        if receiving_line_ids:
+            for i in range(0, len(receiving_line_ids), 500):
+                chunk = receiving_line_ids[i:i + 500]
+                moves = search_read(
+                    cookies,
+                    "stock.move",
+                    [[move_line_field, "in", chunk], ["state", "=", "done"]],
+                    [move_line_field, move_date_field],
+                )
+                for move in moves:
+                    ref = move.get(move_line_field)
+                    line_id = ref[0] if isinstance(ref, list) and ref else ref
+                    date_value = move.get(move_date_field)
+                    if not line_id or not date_value:
+                        continue
+                    if date_value > last_receiving.get(line_id, ""):
+                        last_receiving[line_id] = date_value
+        for order_lines in lines_by_order.values():
+            for line in order_lines:
+                line["_receiving_date"] = to_local(last_receiving.get(line["id"], ""))
+
     # One extra read resolves both product-derived columns.
     products = {}
     if product_fields:
@@ -579,6 +626,8 @@ def main():
                     row.append(amount if source == "last_purchase_value" else currency)
                 elif source == "sections":
                     row.append(line.get("_section", "") if line else "")
+                elif source == "receiving_date":
+                    row.append(line.get("_receiving_date", "") if line else "")
                 elif source == "order_product":
                     row.append(format_value(order_product.get(name), name, product_meta))
                 else:
