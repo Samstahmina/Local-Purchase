@@ -364,11 +364,16 @@ def col_to_letter(col):
 def update_sheet(ws, rows):
     end_col = col_to_letter(len(FLAT_HEADERS))
     needed_rows = len(rows) + 1
-    if ws.row_count < needed_rows or ws.col_count < len(FLAT_HEADERS):
+    needed_cols = len(FLAT_HEADERS)
+    # Columns are resized to exactly what's needed, not just grown, so a
+    # trimmed-down COLUMNS list doesn't leave stale blank columns sitting
+    # past the data from a wider run of the script. Rows only grow, so
+    # anything a person added manually below the data is left alone.
+    if ws.row_count < needed_rows or ws.col_count != needed_cols:
         retry_gspread(
             ws.resize,
             rows=max(needed_rows, ws.row_count),
-            cols=max(len(FLAT_HEADERS), ws.col_count),
+            cols=needed_cols,
         )
     retry_gspread(ws.clear)
     retry_gspread(ws.update, [FLAT_HEADERS], "A1")
