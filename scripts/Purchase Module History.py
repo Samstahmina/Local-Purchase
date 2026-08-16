@@ -552,6 +552,17 @@ def main():
     # A product on a PO can be received across several partial deliveries, so
     # the last Done stock move for the line is what "received" means here.
     move_meta = fields_get(cookies, "stock.move")
+    # Diagnostic: Odoo's UI sometimes relabels the same field ("Scheduled
+    # Date" before a move is done, "Effective Date" after), which fields_get
+    # can't reflect. Print every date-like field's technical name and static
+    # label from both models so the correct one can be picked from the run
+    # log instead of guessed.
+    for model_name, meta in (("stock.move", move_meta), ("stock.picking", fields_get(cookies, "stock.picking"))):
+        print(f"  {model_name} date-like fields:")
+        for fname, info in meta.items():
+            label = info.get("string") or ""
+            if "date" in fname.lower() or "date" in label.lower():
+                print(f"    {fname!r}: {label!r}")
     move_line_field = resolve(move_meta, MOVE_LINE_FIELD)
     move_date_field = resolve(move_meta, MOVE_DATE_FIELD)
     if not move_line_field or not move_date_field:
