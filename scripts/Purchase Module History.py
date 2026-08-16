@@ -2,26 +2,30 @@
 
 The columns, their order and their labels come from the saved Odoo export
 template (ir.exports id 572, "Procurement 1") captured in
-`Purchase Module History.har`; the record filter comes from the list view the
-same capture was taken from:
+`Purchase Module History.har`. The record filter is by creation date, not
+status -- orders in any state (draft, sent, purchase, done, ...) are
+included except cancelled ones:
 
-    date_approve >= 2024-12-31 18:00:24 UTC  (2025-01-01 00:00 Dhaka)
-    AND date_approve <= now
-    AND state = 'purchase'
+    create_date >= 2024-12-31 18:00:24 UTC  (2025-01-01 00:00 Dhaka)
+    AND create_date <= now
     AND company_id in (1, 2, 3)
+    AND state != 'cancel'
 
 Two departures from the template. Odoo's "Order Lines/Last Purchase" packs an
 amount, a currency and the originating PO reference into one string, so it is
 split into an amount column and a "Currency-Last Purchase" column and the PO
-reference is dropped. And six of the template's columns are not wanted here:
-Priority, PI No., Order Status, Source Document, Gate Entry and Order
-Lines/Product/Product Category.
+reference is dropped. And seven of the template's columns are not wanted here:
+Priority, PI No., Order Status, Source Document, Gate Entry, Order
+Lines/Product/Product Category and Total.
 
 On top of the template there is a Responsible column, holding the "Add a
-section" heading -- where the requisitioning person and APR number are
-written -- that each product line sits under. A heading covers every line
-beneath it until the next heading, so consecutive rows repeat a heading for as
-many products as it covers. Lines above the first heading stay blank.
+section" heading(s) -- where the requisitioning person and APR number are
+written -- that each product line sits under. Several headings can appear
+back-to-back before the next product line; only ones mentioning "APR" or
+starting with "By" (not followed straight by a number) are kept, everything
+else is ignored, and consecutive kept headings are joined together. A kept
+heading (or group of them) covers every line beneath it until the next kept
+heading. Lines above the first kept heading stay blank.
 
 Odoo explodes `order_line/*` columns into one row per order line, so an order
 with three lines produces three rows with the order-level columns repeated.
@@ -53,9 +57,9 @@ GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
 # so every datetime crossing the wire gets shifted by this offset.
 TZ_OFFSET = timedelta(hours=6)
 
-# Start of the window, exactly as the captured request sent it: 2025-01-01
-# 00:00 Dhaka expressed in UTC. Fixed, not configurable — the sheet is meant to
-# hold the same history the manual download produces.
+# Start of the window: 2025-01-01 00:00 Dhaka expressed in UTC. Fixed, not
+# configurable — the sheet is meant to hold the same history the manual
+# download produces. Filters on create_date, not date_approve.
 START_UTC = "2024-12-31 18:00:24"
 
 # Companies whose orders belong in this sheet.
@@ -90,7 +94,6 @@ COLUMNS = [
     ("create_uid", "Created by", "order"),
     ("last_approver", "Last Approver", "order"),
     ("date_approve", "Confirmation Date", "order"),
-    ("amount_total", "Total", "order"),
     ("x_studio_currency", "Currency.", "order"),
     ("state", "Status", "order"),
     ("payment_term_id", "Payment Terms", "order"),
@@ -122,11 +125,30 @@ DATETIME_FIELDS = {"create_date", "date_approve"}
 
 # "Add a section" and "Add a note" rows are stored in order_line alongside the
 # real lines and are told apart by display_type; a normal line leaves it unset.
-# The heading text an "Add a section" row carries is just its `name`. Those
-# headings are where the requisitioning person and APR number get written, so
-# each one fills the Responsible column for the product lines it covers.
+# The heading text an "Add a section" row carries is just its `name`. Several
+# headings can appear back-to-back before the next product line, and not
+# every one of them is meaningful -- only the ones carrying the APR number or
+# the requisitioning person's name are, so only those are kept; anything else
+# (e.g. a plain grouping label) is ignored rather than clobbering the ones
+# that matter. Consecutive kept headings before the next product line are
+# joined together, since e.g. an APR heading and a By heading describe the
+# same responsible party.
 SECTION_DISPLAY_TYPE = "line_section"
 LINE_BOOKKEEPING_FIELDS = ["display_type", "name", "sequence"]
+
+# Kept: the heading mentions "APR" anywhere, or starts with "By" and isn't
+# "By" followed straight by a number (that's some other code, not a name).
+SECTION_APR = re.compile(r"apr", re.IGNORECASE)
+SECTION_BY = re.compile(r"^\s*by\b", re.IGNORECASE)
+SECTION_BY_NUMERIC = re.compile(r"^\s*by\s*\d", re.IGNORECASE)
+
+
+def section_is_relevant(text):
+    if not text:
+        return False
+    if SECTION_APR.search(text):
+        return True
+    return bool(SECTION_BY.match(text) and not SECTION_BY_NUMERIC.match(text))
 
 # Which model each column's source reads from, for the field-existence check.
 SOURCE_MODEL = {
@@ -420,20 +442,22 @@ def main():
         f for f in dict.fromkeys(order_product_names + line_product_names) if f in product_meta
     ]
 
-    # The list view filter, verbatim from the capture, narrowed to the
-    # companies above. The context's allowed_company_ids only steers record
-    # rules, so the companies are pinned in the domain rather than relied on.
+    # Filtered by creation date and company; status is not otherwise tracked,
+    # except that cancelled orders are excluded. Orders in any other state
+    # (draft, sent, purchase, done, ...) are included. The context's
+    # allowed_company_ids only steers record rules, so the companies are
+    # pinned in the domain rather than relied on.
     end_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     domain = [
         "&", "&", "&",
-        ["date_approve", ">=", START_UTC],
-        ["date_approve", "<=", end_utc],
-        ["state", "=", "purchase"],
+        ["create_date", ">=", START_UTC],
+        ["create_date", "<=", end_utc],
         ["company_id", "in", COMPANY_IDS],
+        ["state", "!=", "cancel"],
     ]
     print(
-        f"Fetching confirmed purchase orders for companies {COMPANY_IDS}, "
-        f"{START_UTC} to {end_utc} UTC..."
+        f"Fetching purchase orders for companies {COMPANY_IDS}, "
+        f"{START_UTC} to {end_utc} UTC (by creation date, excluding cancelled)..."
     )
 
     orders = search_read(cookies, "purchase.order", domain, sorted(set(order_fields)))
@@ -467,26 +491,35 @@ def main():
         oid = order_id[0] if isinstance(order_id, list) and order_id else order_id
         grouped.setdefault(oid, []).append(line)
 
-    # A section heading governs every product line beneath it until the next
-    # heading, so walking each PO's lines in their on-screen order and carrying
-    # the last heading forward reproduces what the PO looks like. The heading
-    # rows themselves are dropped: they hold no product, so leaving them in
-    # would put a blank row in the sheet for every section.
+    # A relevant section heading (see section_is_relevant) governs every
+    # product line beneath it until the next relevant heading. Consecutive
+    # relevant headings before any product line accumulate into one group
+    # (joined with ", "); a non-relevant heading in between is skipped rather
+    # than breaking that group or clearing it. The heading rows themselves
+    # are dropped: they hold no product, so leaving them in would put a blank
+    # row in the sheet for every section.
     lines_by_order = {}
     section_count = 0
     orders_with_sections = set()
     for oid, order_lines in grouped.items():
         order_lines.sort(key=lambda l: (l.get("sequence") or 0, l.get("id") or 0))
-        current_section = ""
+        section_parts = []
+        parts_used = True
         for line in order_lines:
             if line.get("display_type") == SECTION_DISPLAY_TYPE:
-                current_section = (line.get("name") or "").strip()
                 section_count += 1
                 orders_with_sections.add(oid)
+                heading = (line.get("name") or "").strip()
+                if section_is_relevant(heading):
+                    if parts_used:
+                        section_parts = []
+                        parts_used = False
+                    section_parts.append(heading)
             elif line.get("display_type"):
                 continue  # a note row; carries no product either
             else:
-                line["_section"] = current_section
+                line["_section"] = ", ".join(section_parts)
+                parts_used = True
                 lines_by_order.setdefault(oid, []).append(line)
 
     print(
