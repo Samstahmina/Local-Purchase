@@ -1,9 +1,9 @@
 name: Purchase Module History
 
 on:
-  # 02:00 UTC is 08:00 in Dhaka, so the sheet is fresh at the start of the day.
+  # Every 30 minutes, so the sheet stays close to live.
   schedule:
-    - cron: "0 2 * * *"
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 # The script rewrites the whole sheet, so a second run starting mid-write would
