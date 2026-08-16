@@ -22,10 +22,10 @@ On top of the template there is a Responsible column, holding the "Add a
 section" heading(s) -- where the requisitioning person and APR number are
 written -- that each product line sits under. Several headings can appear
 back-to-back before the next product line; only ones mentioning "APR" or
-starting with "By" (not followed straight by a number) are kept, everything
-else is ignored, and consecutive kept headings are joined together. A kept
-heading (or group of them) covers every line beneath it until the next kept
-heading. Lines above the first kept heading stay blank.
+"By" somewhere in the text (not "By" followed straight by a number) are
+kept, everything else is ignored, and consecutive kept headings are joined
+together. A kept heading (or group of them) covers every line beneath it
+until the next kept heading. Lines above the first kept heading stay blank.
 
 Odoo explodes `order_line/*` columns into one row per order line, so an order
 with three lines produces three rows with the order-level columns repeated.
@@ -136,11 +136,12 @@ DATETIME_FIELDS = {"create_date", "date_approve"}
 SECTION_DISPLAY_TYPE = "line_section"
 LINE_BOOKKEEPING_FIELDS = ["display_type", "name", "sequence"]
 
-# Kept: the heading mentions "APR" anywhere, or starts with "By" and isn't
-# "By" followed straight by a number (that's some other code, not a name).
+# Kept: the heading mentions "APR" anywhere, or mentions "By" anywhere as its
+# own word (e.g. "By Sohel Rana" or "Mr Kashem-By WhatsApp") and isn't "By"
+# followed straight by a number (that's some other code, not a name).
 SECTION_APR = re.compile(r"apr", re.IGNORECASE)
-SECTION_BY = re.compile(r"^\s*by\b", re.IGNORECASE)
-SECTION_BY_NUMERIC = re.compile(r"^\s*by\s*\d", re.IGNORECASE)
+SECTION_BY = re.compile(r"\bby\b", re.IGNORECASE)
+SECTION_BY_NUMERIC = re.compile(r"\bby\s*\d", re.IGNORECASE)
 
 
 def section_is_relevant(text):
@@ -148,7 +149,7 @@ def section_is_relevant(text):
         return False
     if SECTION_APR.search(text):
         return True
-    return bool(SECTION_BY.match(text) and not SECTION_BY_NUMERIC.match(text))
+    return bool(SECTION_BY.search(text) and not SECTION_BY_NUMERIC.search(text))
 
 # Which model each column's source reads from, for the field-existence check.
 SOURCE_MODEL = {
