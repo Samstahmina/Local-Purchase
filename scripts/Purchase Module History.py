@@ -139,6 +139,13 @@ MOVE_DATE_FIELD = "date"
 
 DATETIME_FIELDS = {"create_date", "date_approve"}
 
+# Sheet headers that hold a date (or datetime) value. Written as a real Sheets
+# date serial number rather than text (see to_serial), then given an explicit
+# numberFormat every run so they always display as dd-mm-yy, however Sheets'
+# own locale settings or a prior manual reformat might have left them.
+DATE_HEADERS = {"Created on", "Confirmation Date", "Order Lines/Last Receiving Date"}
+DATE_NUMBER_FORMAT = {"numberFormat": {"type": "DATE", "pattern": "dd-mm-yy"}}
+
 # "Add a section" and "Add a note" rows are stored in order_line alongside the
 # real lines and are told apart by display_type; a normal line leaves it unset.
 # The heading text an "Add a section" row carries is just its `name`. Several
@@ -319,11 +326,30 @@ def to_local(value):
         return value
 
 
+# Google Sheets' own date epoch, used to turn a date/datetime string into the
+# serial number Sheets stores dates as internally. Writing the serial number
+# (a plain float) rather than the text lets a numberFormat render it as a real
+# date, immune to whatever the sheet's locale would otherwise guess from text.
+SHEETS_EPOCH = datetime(1899, 12, 30)
+
+
+def to_serial(value):
+    """Turn a 'YYYY-MM-DD[ HH:MM:SS]' string into a Sheets date serial number."""
+    if not value:
+        return ""
+    fmt = "%Y-%m-%d %H:%M:%S" if " " in value else "%Y-%m-%d"
+    try:
+        parsed = datetime.strptime(value, fmt)
+    except ValueError:
+        return value
+    return (parsed - SHEETS_EPOCH).total_seconds() / 86400
+
+
 def format_value(value, field_name, meta):
     if value is None or value is False:
         return ""
     if field_name in DATETIME_FIELDS:
-        return to_local(value)
+        return to_serial(to_local(value))
     # many2one arrives as [id, display_name]; the export writes the name.
     if isinstance(value, list):
         if len(value) == 2 and isinstance(value[0], int) and isinstance(value[1], str):
@@ -378,6 +404,10 @@ def col_to_letter(col):
     return result
 
 
+def date_column_letters(headers):
+    return [col_to_letter(i + 1) for i, label in enumerate(headers) if label in DATE_HEADERS]
+
+
 def update_sheet(ws, rows):
     end_col = col_to_letter(len(FLAT_HEADERS))
     needed_rows = len(rows) + 1
@@ -402,6 +432,17 @@ def update_sheet(ws, rows):
         end_row = start_row + len(chunk) - 1
         retry_gspread(ws.update, chunk, f"A{start_row}:{end_col}{end_row}")
         print(f"  wrote rows {start_row}-{end_row}")
+
+    # Reapplied every run (clear() only touches values, not formatting, but a
+    # column can shift or get reformatted by hand between runs) so the date
+    # columns always render as dd-mm-yy regardless of the sheet's locale.
+    if rows:
+        date_formats = [
+            {"range": f"{letter}2:{letter}{needed_rows}", "format": DATE_NUMBER_FORMAT}
+            for letter in date_column_letters(FLAT_HEADERS)
+        ]
+        if date_formats:
+            retry_gspread(ws.batch_format, date_formats)
 
 
 # ---------------------------------------------------------------------------
@@ -589,7 +630,7 @@ def main():
                         last_receiving[line_id] = date_value
         for order_lines in lines_by_order.values():
             for line in order_lines:
-                line["_receiving_date"] = to_local(last_receiving.get(line["id"], ""))
+                line["_receiving_date"] = to_serial(to_local(last_receiving.get(line["id"], "")))
 
     # One extra read resolves both product-derived columns.
     products = {}

@@ -3,7 +3,7 @@ import sys
 import json
 import time
 import requests
-from datetime import date
+from datetime import date, datetime
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -88,6 +88,29 @@ FLAT_HEADERS = [
     "Vendor",
     "PO",
 ]
+
+# "Receive Date" is written as a real Sheets date serial number (see
+# to_serial) rather than text, then given an explicit numberFormat every run
+# so it always displays as dd-mm-yy regardless of the sheet's locale or any
+# prior manual reformat.
+DATE_HEADERS = {"Receive Date"}
+DATE_NUMBER_FORMAT = {"numberFormat": {"type": "DATE", "pattern": "dd-mm-yy"}}
+
+# Google Sheets' own date epoch, used to turn a date string into the serial
+# number Sheets stores dates as internally.
+SHEETS_EPOCH = datetime(1899, 12, 30)
+
+
+def to_serial(value):
+    """Turn a 'YYYY-MM-DD[ HH:MM:SS]' string into a Sheets date serial number."""
+    if not value:
+        return ""
+    fmt = "%Y-%m-%d %H:%M:%S" if " " in value else "%Y-%m-%d"
+    try:
+        parsed = datetime.strptime(value, fmt)
+    except ValueError:
+        return value
+    return (parsed - SHEETS_EPOCH).total_seconds() / 86400
 
 
 def get_worksheet(sh, name):
@@ -264,7 +287,7 @@ def flatten_record(record):
     row.append(cell(record, "landed_cost"))
     row.append(cell(record, "opening_qty"))
     row.append(cell(record, "opening_value"))
-    row.append(cell(record, "receive_date"))
+    row.append(to_serial(cell(record, "receive_date")))
     row.append(cell(record, "receive_qty"))
     row.append(cell(record, "receive_value"))
     row.append(cell(record, "issue_qty"))
@@ -279,6 +302,10 @@ def flatten_record(record):
     return row
 
 
+def date_column_letters(headers):
+    return [col_to_letter(i + 1) for i, label in enumerate(headers) if label in DATE_HEADERS]
+
+
 def update_sheet(ws, rows):
     retry_gspread(ws.clear)
     retry_gspread(ws.update, [FLAT_HEADERS], "A1")
@@ -291,6 +318,17 @@ def update_sheet(ws, rows):
             start_row = i + 2
             end_row = i + len(chunk) + 1
             retry_gspread(ws.update, chunk, f"A{start_row}:{end_col}{end_row}")
+
+        # Reapplied every run (clear() only touches values, not formatting,
+        # but a column can shift or get reformatted by hand between runs) so
+        # Receive Date always renders as dd-mm-yy regardless of locale.
+        end_row = len(rows) + 1
+        date_formats = [
+            {"range": f"{letter}2:{letter}{end_row}", "format": DATE_NUMBER_FORMAT}
+            for letter in date_column_letters(FLAT_HEADERS)
+        ]
+        if date_formats:
+            retry_gspread(ws.batch_format, date_formats)
 
 
 def main():
