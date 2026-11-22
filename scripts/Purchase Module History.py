@@ -57,7 +57,67 @@ ODOO_PASSWORD = os.environ.get("ODOO_PASSWORD", "")
 
 SPREADSHEET_ID = "1u6JyG3xvYXO4ID83r7f_G8GQIz7wFt6gpLTYZVoZFnE"
 SHEET_NAME = "Purchase Module History"
+
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+
+# ---------------------------------------------------------------------------
+# Secondary destinations: the two Inventory Overview workbooks.
+#
+# Those workbooks already carried a purchase-history feed in their own, much
+# narrower 13-column layout, one workbook per company, newest order first.
+# That feed had stopped -- both tabs sat frozen at 10,000 rows with 2026-11-09
+# as their newest order -- so the same export that fills SHEET_NAME above is
+# reshaped into that layout and written here too. The layout is not ours to
+# redesign: other tabs in each workbook read these columns by position.
+#
+# Rows are routed by the Company column, which separates the two workbooks
+# cleanly -- every order reference already on the Zipper tab belongs to company
+# "Zipper" and every one on the Button tab to "Metal Trims", with no overlap.
+# ---------------------------------------------------------------------------
+LIVE_HEADERS = [
+    "Currency",
+    "Order Reference",
+    "Vendor",
+    "Product Name",
+    "Product Reference",
+    "Quantity",
+    "Received Qty",
+    "Unit Price",
+    "Total",
+    "Status",
+    "Shipment Mode",
+    "Payment Terms",
+    "Created on",
+]
+
+LIVE_DESTINATIONS = [
+    {
+        "company": "Zipper",
+        "spreadsheet_id": "1bRAOEAXPoihOFtaEfCO6wigN2GnHbXyy97FyRInav8A",
+        "sheet_name": "Live Data_Zip",
+    },
+    {
+        "company": "Metal Trims",
+        "spreadsheet_id": "1n3I1G48V2r9JgJcPyG22KAV2I47FqS5MmBfRH3DKJrw",
+        "sheet_name": "Live Data_MT",
+    },
+]
+
+# "Created on" on these tabs is a full timestamp rather than the dd-mm-yy the
+# main sheet uses, so it keeps the format the existing rows were written in.
+LIVE_DATE_FORMAT = {
+    "numberFormat": {"type": "DATE_TIME", "pattern": "yyyy-mm-dd h:mm:ss"}
+}
+
+# Both tabs hold orders older than START_UTC -- 2,128 on the Zipper tab going
+# back to Aug 2024, 5,046 on the Button tab going back to Jul 2023. The Odoo
+# query cannot reproduce those, so a plain rewrite would delete them. They are
+# read back and re-appended underneath the fresh rows instead.
+LIVE_KEEP_LEGACY_ROWS = True
+
+# Columns N onward belong to the workbook, not to this export: the Zipper tab
+# keeps a "[ref] name" array formula in P2. Only A:M is ever cleared.
+LIVE_LAST_COL = "M"
 
 # The list view was captured with tz=Asia/Almaty, which is UTC+6 like Dhaka.
 # Odoo stores and filters datetimes in UTC but displays them in the user's tz,
@@ -408,6 +468,168 @@ def date_column_letters(headers):
     return [col_to_letter(i + 1) for i, label in enumerate(headers) if label in DATE_HEADERS]
 
 
+# ---------------------------------------------------------------------------
+# The narrow "Live Data" layout
+# ---------------------------------------------------------------------------
+
+# Odoo packs a product's internal reference into its display_name as a leading
+# "[CODE] " prefix; the Live Data tabs keep the code and the name apart.
+PRODUCT_REF_RE = re.compile(r"^\s*\[([^\]]*)\]\s*(.*)$", re.S)
+
+
+def split_product(display_name):
+    """'[R_1_007] Snap-Ring' -> ('Snap-Ring', 'R_1_007'); no code -> (name, '')."""
+    if not display_name:
+        return "", ""
+    match = PRODUCT_REF_RE.match(str(display_name))
+    if not match:
+        return str(display_name).strip(), ""
+    return match.group(2).strip(), match.group(1).strip()
+
+
+def to_number(value):
+    """Blank-safe float, so Quantity x Unit Price never raises on an empty cell."""
+    if value in ("", None, False):
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def build_live_rows(rows, company):
+    """Reshape the 24-column export into the 13-column Live Data layout."""
+    idx = {label: i for i, label in enumerate(FLAT_HEADERS)}
+    company_col = idx["Company"]
+    out = []
+    for row in rows:
+        if row[company_col] != company:
+            continue
+        name, ref = split_product(row[idx["Order Lines/Product"]])
+        qty = to_number(row[idx["Order Lines/Total Quantity"]])
+        price = to_number(row[idx["Order Lines/Unit Price"]])
+        out.append([
+            row[idx["Currency."]],
+            row[idx["Order Reference"]],
+            row[idx["Vendor"]],
+            name,
+            ref,
+            qty,
+            to_number(row[idx["Order Lines/Received Qty"]]),
+            price,
+            qty * price,
+            row[idx["Status"]],
+            row[idx["Shipment Mode"]],
+            row[idx["Payment Terms"]],
+            row[idx["Created on"]],
+        ])
+    # Newest order first, matching how these tabs were already ordered. A blank
+    # "Created on" sorts oldest, so it never displaces a dated row.
+    out.sort(key=lambda r: to_number(r[12]), reverse=True)
+    return out
+
+
+def legacy_live_rows(ws, cutoff_serial):
+    """Rows already on the tab that predate the export window.
+
+    Odoo is only queried from START_UTC onward, so without this a rewrite would
+    silently drop every older order the tab had accumulated.
+    """
+    if not LIVE_KEEP_LEGACY_ROWS:
+        return []
+    existing = retry_gspread(
+        ws.get, "A2:%s" % LIVE_LAST_COL, value_render_option="UNFORMATTED_VALUE"
+    ) or []
+    width = len(LIVE_HEADERS)
+    kept = []
+    for row in existing:
+        padded = list(row) + [""] * (width - len(row))
+        created = padded[12]
+        # Only a real serial can be compared; a blank or leftover text cell is
+        # dropped rather than guessed at.
+        if isinstance(created, (int, float)) and created and created < cutoff_serial:
+            kept.append(padded[:width])
+    kept.sort(key=lambda r: to_number(r[12]), reverse=True)
+    return kept
+
+
+def refresh_helper_formula(ws, last_row):
+    """Re-point a helper array formula in N2:Z2 at the new last data row.
+
+    The Zipper tab builds "[ref] name" in P2 from ranges hardwired to row
+    10001. Left alone that stops covering the data the moment the export passes
+    10,000 rows, which is how the previous feed came to look stuck.
+    """
+    try:
+        head = retry_gspread(ws.get, "N2:Z2", value_render_option="FORMULA") or []
+    except gspread.exceptions.APIError:
+        return
+    if not head or not head[0]:
+        return
+    for offset, cell in enumerate(head[0]):
+        if not isinstance(cell, str) or not cell.startswith("="):
+            continue
+        if not re.search(r"[A-Z]+2:[A-Z]+\d+", cell):
+            continue
+        updated = re.sub(
+            r"([A-Z]+2:[A-Z]+)\d+", lambda m: m.group(1) + str(last_row), cell
+        )
+        if updated != cell:
+            retry_gspread(
+                ws.update, [[updated]], "%s2" % col_to_letter(14 + offset), raw=False
+            )
+        return
+
+
+def get_live_worksheet(sh, name):
+    """Strict lookup: these tabs have to exist already.
+
+    get_worksheet() creates a missing tab, which is right for the main export
+    but wrong here -- a typo would quietly add a stray tab to a workbook whose
+    other sheets read these columns by position, instead of failing loudly.
+    """
+    try:
+        return sh.worksheet(name)
+    except gspread.exceptions.WorksheetNotFound:
+        for ws in sh.worksheets():
+            if ws.title.strip().lower() == name.strip().lower():
+                return ws
+        raise
+
+
+def update_live_sheet(ws, rows, cutoff_serial):
+    """Rewrite A:M only, preserving pre-window history and the helper columns."""
+    body = rows + legacy_live_rows(ws, cutoff_serial)
+    needed_rows = len(body) + 1
+    if ws.row_count < needed_rows or ws.col_count < len(LIVE_HEADERS):
+        retry_gspread(
+            ws.resize,
+            rows=max(needed_rows, ws.row_count),
+            cols=max(len(LIVE_HEADERS), ws.col_count),
+        )
+    # Deliberately not ws.clear(): columns N onward are the workbook's own and
+    # have to survive. batch_clear on A:M also wipes any rows left over from a
+    # longer previous run.
+    retry_gspread(ws.batch_clear, ["A:%s" % LIVE_LAST_COL])
+    retry_gspread(ws.update, [LIVE_HEADERS], "A1")
+
+    chunk_size = 2000
+    for i in range(0, len(body), chunk_size):
+        chunk = body[i:i + chunk_size]
+        start_row = i + 2
+        end_row = start_row + len(chunk) - 1
+        retry_gspread(ws.update, chunk, "A%d:%s%d" % (start_row, LIVE_LAST_COL, end_row))
+        print("  wrote rows %d-%d" % (start_row, end_row))
+
+    if body:
+        retry_gspread(
+            ws.batch_format,
+            [{"range": "M2:M%d" % needed_rows, "format": LIVE_DATE_FORMAT}],
+        )
+        refresh_helper_formula(ws, needed_rows)
+    return len(rows), len(body) - len(rows)
+
+
 def update_sheet(ws, rows):
     end_col = col_to_letter(len(FLAT_HEADERS))
     needed_rows = len(rows) + 1
@@ -702,6 +924,48 @@ def main():
 
     update_sheet(ws, rows)
     print(f"Updated '{SHEET_NAME}' with {len(rows)} rows.")
+
+    # The same export, reshaped for the two Inventory Overview workbooks.
+    failures = []
+    cutoff_serial = to_serial(to_local(START_UTC))
+    for dest in LIVE_DESTINATIONS:
+        name = dest["sheet_name"]
+        print(f"Updating '{name}' ({dest['company']})...")
+        try:
+            live_sh = retry_gspread(gc.open_by_key, dest["spreadsheet_id"])
+            live_ws = retry_gspread(get_live_worksheet, live_sh, name)
+            fresh, kept = update_live_sheet(
+                live_ws, build_live_rows(rows, dest["company"]), cutoff_serial
+            )
+            print(f"Updated '{name}' with {fresh} rows ({kept} older rows kept).")
+        except (
+            gspread.exceptions.SpreadsheetNotFound,
+            gspread.exceptions.WorksheetNotFound,
+        ):
+            # Every destination is reported rather than dying on the first, so
+            # one broken target never hides another.
+            print(
+                f"  Cannot write '{name}': no such tab in "
+                f"{dest['spreadsheet_id']}.",
+                file=sys.stderr,
+            )
+            failures.append(name)
+            continue
+        except gspread.exceptions.APIError as e:
+            status = e.response.status_code if getattr(e, "response", None) else None
+            if status in (403, 404):
+                print(
+                    f"  Cannot write '{name}': the service account cannot open "
+                    f"{dest['spreadsheet_id']}. Share that spreadsheet with the "
+                    f"service account as Editor.",
+                    file=sys.stderr,
+                )
+                failures.append(name)
+                continue
+            raise
+
+    if failures:
+        sys.exit("Failed to update: %s" % ", ".join(failures))
 
 
 if __name__ == "__main__":
